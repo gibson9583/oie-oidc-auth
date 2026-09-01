@@ -1,0 +1,25 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17', cache: maven}
+      - name: Verify version
+        run: test "${GITHUB_REF_NAME#v}" = "$(jq -r .version oie.json)"
+      - name: Download OIE build dependencies
+        run: |
+          curl -fSL -o oie.tar.gz https://github.com/OpenIntegrationEngine/engine/releases/download/v4.6.0-rc1/oie_unix_4_6_0-rc1.tar.gz
+          tar xzf oie.tar.gz
+          echo "OIE_HOME=$GITHUB_WORKSPACE/oie" >> "$GITHUB_ENV"
+      - name: Build
+        run: mvn -B -ntp clean package
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/oidcauth-*.zip

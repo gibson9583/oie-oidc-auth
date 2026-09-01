@@ -1,0 +1,10 @@
+<pluginMetaData path="oidcauth">
+  <name>OIDC Authentication</name><author>Open Integration Engine</author><pluginVersion>0.1.0</pluginVersion><mirthVersion>4.6.0</mirthVersion><url>https://openintegrationengine.org</url>
+  <description>Validates OIDC ID tokens, binds subjects to named engine users, optionally provisions users, and synchronizes RBAC roles.</description>
+  <serverClasses><string>org.openintegrationengine.plugins.oidc.OidcAuthorizationPlugin</string></serverClasses>
+  <library type="SHARED" path="oidcauth-shared.jar" />
+  <library type="SHARED" path="lib/nimbus-jose-jwt-9.37.3.jar" />
+  <library type="SHARED" path="lib/jcip-annotations-1.0-1.jar" />
+  <apiProvider type="SERVLET_INTERFACE" name="org.openintegrationengine.plugins.oidc.OidcAdminServletInterface" />
+  <apiProvider type="SERVER_CLASS" name="org.openintegrationengine.plugins.oidc.OidcAdminServlet" />
+</pluginMetaData>
