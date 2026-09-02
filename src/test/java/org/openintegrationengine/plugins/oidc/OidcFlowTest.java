@@ -17,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -55,6 +56,7 @@ class OidcFlowTest {
     private static final AtomicReference<String> challenge = new AtomicReference<>();
     private static final AtomicReference<String> nonce = new AtomicReference<>();
     private static final AtomicReference<Map<String, String>> lastTokenRequest = new AtomicReference<>();
+    private static final AtomicReference<String> lastAuthorization = new AtomicReference<>();
     /** Lets a test make the provider misbehave. */
     private static volatile String nonceOverride;
     private static volatile int tokenStatus = 200;
@@ -64,9 +66,12 @@ class OidcFlowTest {
         key = new RSAKeyGenerator(2048).keyID("k1").generate();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         base = "http://127.0.0.1:" + server.getAddress().getPort();
-        server.createContext("/.well-known/openid-configuration", exchange -> respond(exchange, 200,
-                "{\"issuer\":\"" + base + "\",\"jwks_uri\":\"" + base + "/jwks\",\"authorization_endpoint\":\"" + base
-                        + "/authorize\",\"token_endpoint\":\"" + base + "/token\"}"));
+        String endpoints = "\"issuer\":\"" + base + "\",\"jwks_uri\":\"" + base + "/jwks\",\"authorization_endpoint\":\"" + base
+                + "/authorize\",\"token_endpoint\":\"" + base + "/token\"";
+        server.createContext("/.well-known/openid-configuration", exchange -> respond(exchange, 200, "{" + endpoints + "}"));
+        // The same provider, describing itself as taking the secret in the body only.
+        server.createContext("/post-only/.well-known/openid-configuration", exchange -> respond(exchange, 200,
+                "{" + endpoints + ",\"token_endpoint_auth_methods_supported\":[\"client_secret_post\"]}"));
         server.createContext("/jwks", exchange -> respond(exchange, 200, new JWKSet(key.toPublicJWK()).toString()));
         server.createContext("/token", exchange -> {
             Map<String, String> form = new HashMap<>();
@@ -76,8 +81,18 @@ class OidcFlowTest {
                         URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8));
             }
             lastTokenRequest.set(form);
+            // Client authentication, either way a provider takes it.
+            String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+            lastAuthorization.set(authorization);
+            String clientId = form.get("client_id");
+            String clientSecret = form.get("client_secret");
+            if (authorization != null && authorization.startsWith("Basic ")) {
+                String[] pair = new String(Base64.getDecoder().decode(authorization.substring(6)), StandardCharsets.UTF_8).split(":", 2);
+                clientId = URLDecoder.decode(pair[0], StandardCharsets.UTF_8);
+                clientSecret = URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+            }
             boolean ok = "authorization_code".equals(form.get("grant_type")) && issuedCode.equals(form.get("code"))
-                    && "test-client-secret".equals(form.get("client_secret"))
+                    && "client".equals(clientId) && "test-client-secret".equals(clientSecret)
                     && "https://admin.test/oidc/callback".equals(form.get("redirect_uri"))
                     && form.get("code_verifier") != null
                     && OidcTransaction.codeChallenge(form.get("code_verifier")).equals(challenge.get());
@@ -119,12 +134,18 @@ class OidcFlowTest {
         nonceOverride = null;
         tokenStatus = 200;
         issuedCode = "code-1";
+        lastAuthorization.set(null);
+        lastTokenRequest.set(null);
     }
 
     private static OidcConfig config() {
+        return config("/.well-known/openid-configuration");
+    }
+
+    private static OidcConfig config(String discoveryPath) {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
-        p.setProperty("discovery-url", base + "/.well-known/openid-configuration");
+        p.setProperty("discovery-url", base + discoveryPath);
         p.setProperty("client-id", "client");
         p.setProperty("client-secret", "test-client-secret");
         p.setProperty("web-administrator-url", "https://admin.test/");   // trailing slash is normalized away
@@ -192,8 +213,45 @@ class OidcFlowTest {
         assertEquals("/dashboard", done.returnPath());
         assertEquals(nonce.get(), SignedJWT.parse(done.idToken()).getJWTClaimsSet().getStringClaim("nonce"));
         Map<String, String> sent = lastTokenRequest.get();
-        assertEquals("test-client-secret", sent.get("client_secret"), "the secret is presented by the engine, never the browser");
         assertEquals("https://admin.test/oidc/callback", sent.get("redirect_uri"));
+        // client_secret_basic, the method every provider must support: the
+        // credentials travel in the header and are absent from the body.
+        assertEquals(OidcFlow.basicCredentials("client", "test-client-secret"), lastAuthorization.get());
+        assertEquals("Basic " + Base64.getEncoder().encodeToString("client:test-client-secret".getBytes(StandardCharsets.UTF_8)),
+                lastAuthorization.get());
+        assertEquals(null, sent.get("client_secret"), "never presented twice");
+        assertEquals(null, sent.get("client_id"));
+    }
+
+    @Test
+    void aProviderThatTakesOnlyClientSecretPostGetsTheSecretInTheBody() throws Exception {
+        OidcConfig config = config("/post-only/.well-known/openid-configuration");
+        DiscoveryClient discovery = new DiscoveryClient();
+        OidcFlow flow = new OidcFlow();
+        OidcFlow.Start started = start(flow, config, discovery, "/");
+        String state = query(started.authorizeUrl()).get("state");
+
+        flow.complete(config, discovery.get(config), new OidcTokenValidator(config, discovery), started.sealed(), "code-1",
+                state, System.currentTimeMillis());
+
+        assertEquals(null, lastAuthorization.get(), "no Basic header for a post-only provider");
+        assertEquals("test-client-secret", lastTokenRequest.get().get("client_secret"));
+        assertEquals("client", lastTokenRequest.get().get("client_id"));
+    }
+
+    @Test
+    void basicIsTheDefaultUnlessTheProviderRulesItOut() {
+        assertTrue(new DiscoveryClient.Metadata("i", "j", "a", "t", java.util.List.of()).basicClientAuth(), "unstated: the spec default");
+        assertTrue(new DiscoveryClient.Metadata("i", "j", "a", "t", java.util.List.of("client_secret_post", "client_secret_basic")).basicClientAuth());
+        assertTrue(new DiscoveryClient.Metadata("i", "j", "a", "t", java.util.List.of("private_key_jwt")).basicClientAuth(), "nothing we can do; basic is the best guess");
+        assertTrue(!new DiscoveryClient.Metadata("i", "j", "a", "t", java.util.List.of("client_secret_post")).basicClientAuth());
+    }
+
+    @Test
+    void theBasicCredentialsAreFormEncodedBeforeBase64() {
+        String header = OidcFlow.basicCredentials("my client", "s:e/c+r=t");
+        String decoded = new String(Base64.getDecoder().decode(header.substring("Basic ".length())), StandardCharsets.UTF_8);
+        assertEquals("my+client:s%3Ae%2Fc%2Br%3Dt", decoded, "RFC 6749 §2.3.1: each half urlencoded, so a colon in the secret cannot split the pair");
     }
 
     @Test
@@ -236,6 +294,14 @@ class OidcFlowTest {
         Exception e = assertThrows(Exception.class, () -> flow.complete(config, discovery.get(config),
                 new OidcTokenValidator(config, discovery), started.sealed(), "a-code-the-provider-never-issued", state, System.currentTimeMillis()));
         assertTrue(e.getMessage().contains("invalid_grant"), e.getMessage());
+    }
+
+    @Test
+    void theReturnPathIsCappedSoTheCookieStaysDeliverable() {
+        String longest = "/" + "a".repeat(OidcFlow.MAX_RETURN_PATH_LENGTH - 1);
+        assertEquals(longest, OidcFlow.validReturnPath(longest));
+        assertEquals("/", OidcFlow.validReturnPath(longest + "a"), "one over collapses to the root");
+        assertEquals("/", OidcFlow.validReturnPath("/" + "a".repeat(65_536)));
     }
 
     @Test

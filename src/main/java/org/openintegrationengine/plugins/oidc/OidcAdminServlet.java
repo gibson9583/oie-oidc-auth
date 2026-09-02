@@ -6,11 +6,7 @@
 
 package org.openintegrationengine.plugins.oidc;
 
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -44,9 +40,8 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
     private static final String TXN_COOKIE = "oie-oidc-txn";
     /** One HTTP client for the token exchanges; the flow itself is stateless. */
     private static final OidcFlow FLOW = new OidcFlow();
-    /** Pre-auth endpoints are reachable by anyone; bound how fast. */
-    private static final ConcurrentMap<String, Deque<Long>> FLOW_ATTEMPTS = new ConcurrentHashMap<>();
-    private static final int FLOW_LIMIT_PER_MINUTE = 60;
+    /** The callback is pre-auth and costs an outbound exchange; bound how fast it can be driven. */
+    private static final FlowThrottle THROTTLE = new FlowThrottle();
 
     private final HttpServletResponse response;
 
@@ -80,9 +75,9 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
         boolean configured = !OidcAuthorizationPlugin.killSwitchActive() && config != null && config.enabled();
         out.put("configured", configured);
         if (configured) {
-            out.put("discoveryUrl", config.discoveryUrl());
-            out.put("clientId", config.clientId());
-            // What the login card needs to draw the button, and nothing else.
+            // What the login card needs to draw the button, and nothing else:
+            // the provider and client are the engine's business now that it
+            // runs the flow, and this answers anyone who asks.
             out.put("providerLabel", config.providerLabel());
             out.put("autoRedirect", config.autoRedirect());
         }
@@ -95,7 +90,6 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
     @DontCheckAuthorized
     public String start(String body) throws ClientException {
         try {
-            throttleFlow();
             OidcConfig config = OidcAuthorizationPlugin.currentConfig();
             OidcTokenValidator validator = OidcAuthorizationPlugin.currentValidator();
             if (OidcAuthorizationPlugin.killSwitchActive() || config == null || !config.enabled() || validator == null) {
@@ -125,7 +119,8 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
         // failure could otherwise be retried with a different code.
         clearTransactionCookie(config);
         try {
-            throttleFlow();
+            THROTTLE.hit(FlowThrottle.clientOf(request.getHeader("X-Forwarded-For"), request.getRemoteAddr()),
+                    System.currentTimeMillis());
             OidcTokenValidator validator = OidcAuthorizationPlugin.currentValidator();
             LoginTicketStore tickets = OidcAuthorizationPlugin.currentTickets();
             if (OidcAuthorizationPlugin.killSwitchActive() || config == null || !config.enabled() || validator == null
@@ -142,7 +137,7 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
             long now = System.currentTimeMillis();
             ObjectNode out = JSON.createObjectNode();
             out.put("ok", true);
-            out.put("ticket", tickets.issue(done.idToken(), done.returnPath(), now));
+            out.put("ticket", tickets.issue(done.idToken(), now));
             out.put("returnPath", done.returnPath());
             return out.toString();
         } catch (Exception e) {
@@ -192,33 +187,6 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
 
     private void clearTransactionCookie(OidcConfig config) {
         setTransactionCookie("", config, 0);
-    }
-
-    /**
-     * Per-address, sixty a minute. The engine's login already throttles token
-     * redemption; this covers the two steps before it, which anyone can drive.
-     */
-    private void throttleFlow() {
-        long now = System.currentTimeMillis();
-        String key = String.valueOf(request.getRemoteAddr());
-        if (FLOW_ATTEMPTS.size() > 1000) {
-            FLOW_ATTEMPTS.entrySet().removeIf(entry -> {
-                synchronized (entry.getValue()) {
-                    entry.getValue().removeIf(time -> time < now - 60000);
-                    return entry.getValue().isEmpty();
-                }
-            });
-        }
-        Deque<Long> bucket = FLOW_ATTEMPTS.computeIfAbsent(key, k -> new ArrayDeque<>());
-        synchronized (bucket) {
-            while (!bucket.isEmpty() && bucket.peek() < now - 60000) {
-                bucket.remove();
-            }
-            if (bucket.size() >= FLOW_LIMIT_PER_MINUTE) {
-                throw new SecurityException("too many sign-in attempts");
-            }
-            bucket.add(now);
-        }
     }
 
     @Override

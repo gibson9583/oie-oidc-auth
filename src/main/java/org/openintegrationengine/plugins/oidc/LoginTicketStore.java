@@ -34,12 +34,12 @@ final class LoginTicketStore {
     static final int LIMIT = 10_000;
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    record Ticket(String token, String returnPath, long expires) {}
+    record Ticket(String token, long expires) {}
 
     private final ConcurrentMap<String, Ticket> pending = new ConcurrentHashMap<>();
 
     /** Records a validated token and returns the ticket id that redeems it. */
-    String issue(String token, String returnPath, long now) {
+    String issue(String token, long now) {
         pending.entrySet().removeIf(entry -> entry.getValue().expires() < now);
         if (pending.size() >= LIMIT) {
             throw new SecurityException("too many sign-ins in progress");
@@ -47,7 +47,7 @@ final class LoginTicketStore {
         byte[] id = new byte[32];
         RANDOM.nextBytes(id);
         String key = Base64.getUrlEncoder().withoutPadding().encodeToString(id);
-        pending.put(key, new Ticket(token, returnPath, now + TTL_MILLIS));
+        pending.put(key, new Ticket(token, now + TTL_MILLIS));
         return key;
     }
 

@@ -78,6 +78,8 @@ public interface OidcAdminServletInterface extends BaseServletInterface {
     @POST
     @Path("/test")
     @Operation(summary = "Tests discovery and JWKS connectivity for the supplied policy.")
-    @MirthOperation(name = "testOidcConfiguration", display = "Test OIDC configuration", permission = PERMISSION_MANAGE, auditable = false)
-    String test(String json) throws ClientException;
+    @MirthOperation(name = "testOidcConfiguration", display = "Test OIDC configuration", permission = PERMISSION_MANAGE)
+    // Audited: it makes the engine fetch a URL of the caller's choosing, which
+    // is worth a line naming who asked — but not the policy in the body.
+    String test(@Param(value = "configuration", excludeFromAudit = true) String json) throws ClientException;
 }

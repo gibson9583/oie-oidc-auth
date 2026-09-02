@@ -14,6 +14,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -43,6 +44,13 @@ final class OidcFlow {
     /** Where the provider sends the browser back: a route the web client owns. */
     static final String CALLBACK_PATH = "/oidc/callback";
     private static final int MAX_TOKEN_RESPONSE_BYTES = 1024 * 1024;
+    /**
+     * The return path rides in the sealed cookie, and a cookie has a budget:
+     * past a few KB browsers drop it and servers answer 431, either of which
+     * surfaces as "no sign-in in progress". No route of the web administrator
+     * is anywhere near this long.
+     */
+    static final int MAX_RETURN_PATH_LENGTH = 2048;
 
     record Start(String authorizeUrl, String sealed) {}
     record Completion(String idToken, String returnPath) {}
@@ -108,18 +116,26 @@ final class OidcFlow {
         form.put("grant_type", "authorization_code");
         form.put("code", code);
         form.put("redirect_uri", redirectUri(config));
-        form.put("client_id", config.clientId());
-        form.put("client_secret", config.clientSecret());
         form.put("code_verifier", txn.verifier());
-        String body = form.entrySet().stream().map(e -> encode(e.getKey()) + "=" + encode(e.getValue()))
-                .collect(Collectors.joining("&"));
-        HttpRequest request = HttpRequest.newBuilder(URI.create(metadata.tokenEndpoint()))
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(metadata.tokenEndpoint()))
                 .timeout(Duration.ofSeconds(15))
                 .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-        HttpResponse<String> response = http.send(request, DiscoveryClient.bounded("the token response", MAX_TOKEN_RESPONSE_BYTES));
+                .header("Accept", "application/json");
+        if (metadata.basicClientAuth()) {
+            // client_secret_basic: the one method every provider must support
+            // (RFC 6749 §2.3.1), and the only one some accept for a client with
+            // a secret. Credentials go in the header and nowhere else — a request
+            // presenting them twice is a different, rejectable mistake.
+            request.header("Authorization", basicCredentials(config.clientId(), config.clientSecret()));
+        } else {
+            // The provider says it takes client_secret_post only.
+            form.put("client_id", config.clientId());
+            form.put("client_secret", config.clientSecret());
+        }
+        String body = form.entrySet().stream().map(e -> encode(e.getKey()) + "=" + encode(e.getValue()))
+                .collect(Collectors.joining("&"));
+        HttpResponse<String> response = http.send(request.POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+                DiscoveryClient.bounded("the token response", MAX_TOKEN_RESPONSE_BYTES));
         JsonNode tokens = json.readTree(response.body());
         if (response.statusCode() != 200 || !tokens.path("id_token").isTextual()) {
             String reason = tokens.path("error").asText("HTTP " + response.statusCode());
@@ -142,7 +158,8 @@ final class OidcFlow {
      */
     static String validReturnPath(String value) {
         String path = value == null ? "/" : value.trim();
-        if (!path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\") || path.contains("\r") || path.contains("\n")) {
+        if (path.length() > MAX_RETURN_PATH_LENGTH || !path.startsWith("/") || path.startsWith("//")
+                || path.startsWith("/\\") || path.contains("\r") || path.contains("\n")) {
             return "/";
         }
         // No route of the web administrator has an empty or "." segment, and
@@ -167,6 +184,12 @@ final class OidcFlow {
         } catch (Exception e) {
             return "/";
         }
+    }
+
+    /** RFC 6749 §2.3.1: each half form-urlencoded, joined by a colon, then base64. */
+    static String basicCredentials(String clientId, String clientSecret) {
+        String pair = encode(clientId) + ":" + encode(clientSecret);
+        return "Basic " + Base64.getEncoder().encodeToString(pair.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String encode(String value) {

@@ -12,6 +12,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -27,10 +29,28 @@ public final class DiscoveryClient {
      * What the flow needs from the discovery document. The endpoints may be
      * blank for a provider that publishes none; token validation does not need
      * them, and the sign-in flow reports their absence when it does.
+     * {@code tokenEndpointAuthMethods} is the provider's
+     * {@code token_endpoint_auth_methods_supported}, empty when unstated.
      */
-    public record Metadata(String issuer, String jwksUri, String authorizationEndpoint, String tokenEndpoint) {
+    public record Metadata(String issuer, String jwksUri, String authorizationEndpoint, String tokenEndpoint,
+            List<String> tokenEndpointAuthMethods) {
         public Metadata(String issuer, String jwksUri) {
-            this(issuer, jwksUri, "", "");
+            this(issuer, jwksUri, "", "", List.of());
+        }
+
+        public Metadata(String issuer, String jwksUri, String authorizationEndpoint, String tokenEndpoint) {
+            this(issuer, jwksUri, authorizationEndpoint, tokenEndpoint, List.of());
+        }
+
+        /**
+         * Whether the code exchange authenticates with {@code client_secret_basic}.
+         * That is the method every provider must support and the spec's default
+         * when a provider says nothing, so it is used unless the provider states
+         * that it takes {@code client_secret_post} and not basic.
+         */
+        public boolean basicClientAuth() {
+            return tokenEndpointAuthMethods.isEmpty() || tokenEndpointAuthMethods.contains("client_secret_basic")
+                    || !tokenEndpointAuthMethods.contains("client_secret_post");
         }
     }
 
@@ -172,10 +192,28 @@ public final class DiscoveryClient {
         return cached != null ? cached.issuer() : null;
     }
 
-    public synchronized Metadata get(OidcConfig config) throws Exception {
-        if (cached != null && expires > System.currentTimeMillis()) {
+    /**
+     * The cached document while it is fresh, else a fetch. The fetch runs
+     * OUTSIDE the lock: held across it, a slow provider made every sign-in that
+     * arrived during a refresh queue for up to the timeout plus the body. Two
+     * threads that miss together fetch twice and the later one wins — a wasted
+     * request, never a wrong answer.
+     */
+    public Metadata get(OidcConfig config) throws Exception {
+        synchronized (this) {
+            if (cached != null && expires > System.currentTimeMillis()) {
+                return cached;
+            }
+        }
+        Metadata fetched = fetch(config);
+        synchronized (this) {
+            cached = fetched;
+            expires = System.currentTimeMillis() + config.jwksCacheTtlSeconds() * 1000;
             return cached;
         }
+    }
+
+    private Metadata fetch(OidcConfig config) throws Exception {
         // A blank URL must say so — falling through to the HTTPS check turns
         // "you haven't entered one" into a baffling protocol complaint.
         if (config.discoveryUrl() == null || config.discoveryUrl().isBlank()) {
@@ -212,8 +250,12 @@ public final class DiscoveryClient {
         if (!tokenEndpoint.isBlank()) {
             OidcConfig.requireHttps(tokenEndpoint, "token_endpoint");
         }
-        cached = new Metadata(issuer, jwksUri, authorizationEndpoint, tokenEndpoint);
-        expires = System.currentTimeMillis() + config.jwksCacheTtlSeconds() * 1000;
-        return cached;
+        List<String> authMethods = new ArrayList<>();
+        for (JsonNode method : node.path("token_endpoint_auth_methods_supported")) {
+            if (method.isTextual()) {
+                authMethods.add(method.asText());
+            }
+        }
+        return new Metadata(issuer, jwksUri, authorizationEndpoint, tokenEndpoint, List.copyOf(authMethods));
     }
 }

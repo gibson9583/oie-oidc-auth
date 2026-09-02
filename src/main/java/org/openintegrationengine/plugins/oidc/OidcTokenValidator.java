@@ -8,16 +8,16 @@ package org.openintegrationengine.plugins.oidc;
 
 import java.net.URL;
 import java.time.Instant;
-import java.util.concurrent.TimeUnit;
 
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.proc.BadJOSEException;
 import com.nimbusds.jose.proc.JWSKeySelector;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
-import com.nimbusds.jose.jwk.source.DefaultJWKSetCache;
 import com.nimbusds.jose.jwk.source.JWKSource;
-import com.nimbusds.jose.jwk.source.RemoteJWKSet;
+import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
+import com.nimbusds.jose.util.DefaultResourceRetriever;
+import com.nimbusds.jose.util.ResourceRetriever;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.BadJWTException;
@@ -29,17 +29,23 @@ import com.nimbusds.jwt.proc.DefaultJWTProcessor;
  * confusion), issuer, audience (+azp on multi-audience tokens), and an
  * exp/nbf/iat freshness window with configured skew.
  *
- * <p>The {@link RemoteJWKSet} is held for the lifetime of this validator (one
- * validator per config load), so JWKS fetches are cached across logins with
- * the configured TTL, and an unknown {@code kid} triggers nimbus's built-in
- * rate-limited refetch instead of a fetch per login.</p>
+ * <p>The JWK source is held for the lifetime of this validator (one validator
+ * per config load), so JWKS fetches are cached across logins with the
+ * configured TTL, and an unknown {@code kid} triggers one rate-limited refetch
+ * instead of a fetch per login.</p>
  */
 public final class OidcTokenValidator {
+
+    /** Same bounds as discovery: a key set is kilobytes, and a cloud provider is not 500 ms away. */
+    private static final int JWKS_TIMEOUT_MILLIS = 10_000;
+    private static final int JWKS_MAX_BYTES = 1024 * 1024;
+    /** An unknown kid refetches at most this often; a rotation is not a per-second event. */
+    private static final long JWKS_REFETCH_INTERVAL_MILLIS = 30_000;
 
     private final OidcConfig config;
     private final DiscoveryClient discovery;
     private String jwksUri;
-    private RemoteJWKSet<SecurityContext> jwks;
+    private JWKSource<SecurityContext> jwks;
 
     public OidcTokenValidator(OidcConfig config, DiscoveryClient discovery) {
         this.config = config;
@@ -109,8 +115,18 @@ public final class OidcTokenValidator {
     /** One cached remote JWKS per URI; rebuilt only if discovery moves it. */
     private synchronized JWKSource<SecurityContext> jwksFor(String uri) throws Exception {
         if (jwks == null || !uri.equals(jwksUri)) {
-            long ttl = Math.max(config.jwksCacheTtlSeconds(), 2);
-            jwks = new RemoteJWKSet<>(new URL(uri), null, new DefaultJWKSetCache(ttl, ttl / 2, TimeUnit.SECONDS));
+            long ttlMillis = Math.max(config.jwksCacheTtlSeconds(), 2) * 1000L;
+            // An explicit retriever. Left to nimbus, the fetch ran on its
+            // defaults — 500 ms to connect, 500 ms to read, a 50 KB body — which
+            // an on-premises engine reaching a cloud provider misses routinely,
+            // and the miss lands on whichever sign-in follows each cache expiry.
+            // Every other fetch in this plugin is bounded deliberately; this one
+            // was bounded by accident, and too tightly.
+            ResourceRetriever retriever = new DefaultResourceRetriever(JWKS_TIMEOUT_MILLIS, JWKS_TIMEOUT_MILLIS, JWKS_MAX_BYTES);
+            jwks = JWKSourceBuilder.<SecurityContext>create(new URL(uri), retriever)
+                    .cache(ttlMillis, Math.min(ttlMillis / 2, JWKS_TIMEOUT_MILLIS))
+                    .rateLimited(JWKS_REFETCH_INTERVAL_MILLIS)
+                    .build();
             jwksUri = uri;
         }
         return jwks;

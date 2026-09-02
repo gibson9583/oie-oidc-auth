@@ -76,6 +76,39 @@ password sign-in gets.
 - A save is audited as **Manage OIDC configuration** with the user and outcome
   only; the policy body, client secret included, is excluded from the event.
 
+## Hardening after security review
+
+- Only a ticket is a login credential. A bare ID token presented to
+  `/users/_login` — the pre-1.0 shape — is refused without being examined; it
+  was the one route on which the nonce was never checked.
+- An account bound to a provider subject refuses a local password while SSO is
+  active, unless the operator listed it in `linked-accounts`. Before, anyone
+  who could set an engine password on a JIT-created account (the user, through
+  their own profile) kept a way in after the provider removed them.
+- The login throttle keyed on the username hint, which the web client always
+  sends as `oidc`: twenty SSO sign-ins a minute per engine, and twenty
+  anonymous POSTs denied everyone for the next minute. Ticket redemption is a
+  single map lookup on a 256-bit id and is no longer throttled. The callback —
+  the step that costs an outbound token exchange — is throttled per client
+  (first `X-Forwarded-For` hop, which the web administrator's proxy sets and the
+  engine already trusts for audit) and in total, instead of per proxy address.
+- The JWKS fetch ran on nimbus's defaults: 500 ms to connect and read, a 50 KB
+  body. It now has the same bounds as discovery (10 s, 1 MiB) and refetches an
+  unknown key id at most every 30 seconds.
+- The code exchange authenticates with `client_secret_basic`, the method every
+  provider must support (Cognito accepts nothing else), falling back to
+  `client_secret_post` only when discovery says that is all the provider takes.
+- A spent token is remembered for `max-token-age-seconds` plus the clock skew,
+  the whole window in which it would still validate; the last skew seconds of
+  a token's life were replayable.
+- `/public` no longer reports the discovery URL and client ID; the return path
+  is capped at 2 KB so the sealed cookie stays deliverable; **Test connection**
+  is audited (without its body); discovery refreshes no longer hold every
+  concurrent sign-in behind one fetch.
+- Web administrator: sign-out with auto-redirect on shows the sign-in card
+  instead of bouncing straight back to the provider, and a crafted
+  `/oidc/callback?error=` link no longer evicts a signed-in user.
+
 ## Known limitations
 
 No RP-initiated or front-channel logout; confidential client only; one identity
@@ -85,7 +118,7 @@ sign-in. See the README's *Limitations* section for what each means in practice.
 
 ## Verification
 
-119 unit tests — including the engine-run flow against a local provider that
+130 unit tests — including the engine-run flow against a local provider that
 checks the secret, the PKCE verifier, the redirect URI, and the nonce — and this
 build walked end to end on OIE 4.6.0 with RBAC 1.1.2 against Keycloak through
 the engine-hosted flow (start, provider, `/oidc/callback`, ticket redemption): the settings tab rendered from the schema, refused a save
