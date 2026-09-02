@@ -112,37 +112,47 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
     @Override
     public void configuration(String body) throws ClientException {
         try {
-            // Merge over the live policy: setPluginProperties REPLACES the whole
-            // group, so whatever is handed to it becomes the policy — a body
-            // carrying only some keys must update those and leave the rest, not
-            // blank them. The base is the STORED policy, never the overlaid one:
-            // an operator pin overlays at apply time and is never persisted.
-            Properties stored = OidcAuthorizationPlugin.currentProperties();
-            Properties properties = new Properties();
-            properties.putAll(stored);
-            Properties incoming = OidcConfigLoader.fromJson(body);
-            // Belt and braces: fromJson already whitelists to catalogued keys, so
-            // the reserved "_" reporting keys cannot reach here. Kept so the
-            // invariant is stated where it matters rather than inferred.
-            incoming.stringPropertyNames().stream().filter(k -> k.startsWith("_")).forEach(incoming::remove);
-            // Never persist a PINNED value. The GET serves effective values, so
-            // the form is holding whatever an OIE_OIDC_* variable or system
-            // property overrode — and saving would write that into the stored
-            // policy. Nothing changes while the pin is in place, so the damage
-            // is deferred and invisible: remove the variable later and the pin's
-            // value has silently become permanent. Worst case is an operator
-            // using OIE_OIDC_ENABLED=false as an emergency off, someone pressing
-            // Save, and SSO switching itself back on when the variable is
-            // cleared.
-            for (String key : OidcConfigLoader.pinned()) {
-                incoming.remove(key);
-            }
-            properties.putAll(incoming);
-            OidcConfig.from(properties);   // validate BEFORE persisting
-            OidcConfigLoader.saveAndApply(properties);
+            // The ONLY route to saveAndApply, and merge() validates, so a policy
+            // the engine would reject cannot reach the property store.
+            OidcConfigLoader.saveAndApply(merge(OidcAuthorizationPlugin.currentProperties(), body));
         } catch (Exception e) {
             throw failure("save", e);
         }
+    }
+
+    /**
+     * What a save actually writes. Extracted from {@link #configuration(String)}
+     * so it can be exercised directly: this servlet cannot be constructed
+     * without a JAX-RS request context, and the tests that tried to work around
+     * that by restating these rules proved only that the copy in the test file
+     * agreed with itself — all three could be neutered here with the suite
+     * green. One implementation, called by both.
+     */
+    static Properties merge(Properties stored, String body) throws Exception {
+        // Merge over the live policy: setPluginProperties REPLACES the whole
+        // group, so whatever is handed to it becomes the policy — a body
+        // carrying only some keys must update those and leave the rest, not
+        // blank them. The base is the STORED policy, never the overlaid one:
+        // an operator pin overlays at apply time and is never persisted.
+        Properties properties = new Properties();
+        properties.putAll(stored);
+        // Whitelisted to catalogued keys, so the reserved "_" reporting keys the
+        // GET adds cannot arrive here as policy however the form round-trips.
+        Properties incoming = OidcConfigLoader.fromJson(body);
+        // Never persist a PINNED value. The GET serves effective values, so
+        // the form is holding whatever an OIE_OIDC_* variable or system
+        // property overrode — and saving would write that into the stored
+        // policy. Nothing changes while the pin is in place, so the damage
+        // is deferred and invisible: remove the variable later and the pin's
+        // value has silently become permanent. Worst case is an operator
+        // using OIE_OIDC_ENABLED=false as an emergency off, someone pressing
+        // Save, and SSO switching itself back on when the variable is cleared.
+        for (String key : OidcConfigLoader.pinned()) {
+            incoming.remove(key);
+        }
+        properties.putAll(incoming);
+        OidcConfig.from(properties);   // validate BEFORE persisting
+        return properties;
     }
 
     @Override
