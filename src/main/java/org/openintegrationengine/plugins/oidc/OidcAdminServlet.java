@@ -181,8 +181,8 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
 
     /**
      * HttpOnly and SameSite=Lax; Secure whenever the web administrator is
-     * reached over HTTPS. Path=/ rather than this servlet's path so it reads
-     * the same through the Node deployment's proxy and beside the WAR.
+     * reached over HTTPS. Path=/ rather than this servlet's path so it does not
+     * depend on how the engine API is mounted in front of the browser.
      */
     private void setTransactionCookie(String value, OidcConfig config, long maxAgeSeconds) {
         boolean secure = config != null && config.webAdministratorUrl().startsWith("https://");

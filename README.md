@@ -10,7 +10,7 @@ Build with Java 17 and an OIE 4.6.0 installation:
 OIE_HOME=/path/to/oie mvn clean package
 ```
 
-**Everything lives here.** This extension runs the whole sign-in flow — it sends the browser to the provider, exchanges the code using the client secret, validates the token, and hands the web administrator a one-time ticket to sign in with — so the web administrator needs no OIDC configuration of its own, and SSO works identically in its Node/Docker deployment and in the WAR. Register one redirect URI at your provider, `<web-administrator-url>/oidc/callback`; the tab shows the exact value once the web administrator URL is entered.
+**Everything lives here.** This extension runs the whole sign-in flow — it sends the browser to the provider, exchanges the code using the client secret, validates the token, and hands the web administrator a one-time ticket to sign in with — so the web administrator needs no OIDC configuration of its own. Register one redirect URI at your provider, `<web-administrator-url>/oidc/callback`; the tab shows the exact value once the web administrator URL is entered.
 
 Extract `target/oidcauth-1.0.0.zip` into the engine extensions directory and restart. Verify the extension loaded before touching the UI: the engine log must contain one `OIDC authentication is …` line saying which state it is in — `ACTIVE for <discovery-url>`, `disabled (policy key 'enabled' is false)`, `SWITCHED OFF by OIE_OIDC_DISABLED`, or `not configured: <reason>`. No such line means the extension did not load at all, and no endpoint, permission, or settings tab exists.
 

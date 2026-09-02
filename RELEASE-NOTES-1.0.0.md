@@ -9,9 +9,8 @@ engine's audit log names real people rather than a shared service account.
 **Everything is configured here.** This extension runs the whole Authorization
 Code + PKCE flow — the provider redirect, the code exchange with the client
 secret, token validation — and hands the web administrator a one-time ticket to
-sign in with. The web administrator keeps no OIDC configuration, and SSO works
-identically in its Node/Docker deployment and in the WAR. Register one redirect
-URI at your provider: `<web-administrator-url>/oidc/callback`.
+sign in with. The web administrator keeps no OIDC configuration. Register one
+redirect URI at your provider: `<web-administrator-url>/oidc/callback`.
 
 ## Fixed
 

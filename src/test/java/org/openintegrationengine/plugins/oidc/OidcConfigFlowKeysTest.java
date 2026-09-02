@@ -64,7 +64,7 @@ class OidcConfigFlowKeysTest {
 
         Properties context = enabled();
         context.setProperty("web-administrator-url", "https://engine.example:8443/oie-webadmin/");
-        assertEquals("https://engine.example:8443/oie-webadmin", OidcConfig.from(context).webAdministratorUrl(), "a WAR context path is part of the address");
+        assertEquals("https://engine.example:8443/oie-webadmin", OidcConfig.from(context).webAdministratorUrl(), "a context path is part of the address");
 
         for (String bad : new String[] { "https://admin.example/?x=1", "https://admin.example/#frag", "https://user:pw@admin.example" }) {
             Properties p = enabled();

@@ -23,8 +23,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * The browser-facing half of the Authorization Code + PKCE flow, run by the
- * engine so that every deployment of the web administrator — the Node server
- * and the WAR alike — gets sign-on from the one place the policy lives.
+ * engine so that the web administrator gets sign-on from the one place the
+ * policy lives and needs no configuration of its own.
  *
  * <p>Two steps, each reached by the web client as an authenticated-looking
  * XHR (the engine requires {@code X-Requested-With} on every API request, so
