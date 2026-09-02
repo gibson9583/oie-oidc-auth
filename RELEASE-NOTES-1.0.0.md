@@ -42,6 +42,22 @@ never offers SSO. Register one redirect URI at your provider:
 - An `Error` raised while resolving the user controller escaped `authorizeUser`
   instead of failing closed.
 
+## Settings tab
+
+- Default role and every claim-to-role mapping target are chosen from the
+  engine's RBAC roles; a stored name RBAC no longer lists stays selected and is
+  marked rather than silently replaced. Linked accounts pick the engine user
+  from a list, and once a sign-in has fetched discovery the `issuer#` half of a
+  new binding is prefilled from the engine's own record of the issuer. All of
+  these fall back to free text when the lists cannot be read.
+- Claim fields suggest the usual names as you type (standard OpenID claims;
+  for the roles claim the provider-specific paths, with your client ID filled
+  in) and stay free text.
+- **Test connection** is a pure check: it verifies discovery and counts the
+  signing keys that could verify a token, and changes nothing.
+- Fixed: choosing **Save** in the unsaved-changes prompt silently discarded the
+  tab's changes while reporting success.
+
 ## Known limitations
 
 No RP-initiated or front-channel logout; confidential client only; one identity
