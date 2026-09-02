@@ -6,12 +6,8 @@
 
 package org.openintegrationengine.plugins.oidc;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.HexFormat;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -48,7 +44,6 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     public static final String PLUGIN_POINT = "OIDC Authentication";
 
     private static final Logger log = LogManager.getLogger(OidcAuthorizationPlugin.class);
-    private static final int REPLAY_CACHE_LIMIT = 10000;
     private static final int THROTTLE_SWEEP_THRESHOLD = 1000;
 
     /** The live instance, so the admin servlet can apply a saved policy. */
@@ -59,7 +54,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     private volatile OidcTokenValidator validator;
     /** Why the last apply() rejected the policy, or null if it took. */
     private volatile String lastError;
-    private final ConcurrentMap<String, Long> seen = new ConcurrentHashMap<>();
+    private final ReplayCache replays = new ReplayCache();
     private final ConcurrentMap<String, Deque<Long>> attempts = new ConcurrentHashMap<>();
     private final ClaimsMapper mapper = new ClaimsMapper();
     private final RbacRoleAssigner roles = new RbacRoleAssigner();
@@ -86,7 +81,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
 
     @Override
     public void stop() {
-        seen.clear();
+        replays.clear();
         attempts.clear();
     }
 
@@ -220,15 +215,11 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             throttle(username);
 
             String token = password.substring(5);
-            String tokenHash = hash(token);
             JWTClaimsSet claims = validator.validate(token);
-
-            long now = System.currentTimeMillis();
-            seen.entrySet().removeIf(entry -> entry.getValue() < now);
-            if (seen.size() > REPLAY_CACHE_LIMIT) {
-                throw new SecurityException("replay cache capacity reached");
-            }
-            if (seen.putIfAbsent(tokenHash, now + config.maxTokenAgeSeconds() * 1000) != null) {
+            // Only AFTER the token proves valid: recording an unverified string
+            // would let anyone fill the cache with garbage, and the capacity
+            // guard refuses logins when full.
+            if (!replays.claim(token, config.maxTokenAgeSeconds() * 1000, System.currentTimeMillis())) {
                 return fail("SSO assertion was already used.");
             }
 
@@ -236,7 +227,8 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             UserProvisioner.Result provisioned =
                     new UserProvisioner(UserController.getInstance()).provision(identity, config);
             roles.assign(provisioned.user().getId(), provisioned.created(), identity, config);
-            log.info("OIDC login accepted for user '{}' subject hash {}", identity.username(), hash(identity.subject()));
+            log.info("OIDC login accepted for user '{}' subject hash {}", identity.username(),
+                    ReplayCache.hash(identity.subject()));
             return new LoginStatus(Status.SUCCESS, null, identity.username());
         } catch (Throwable e) {
             // Throwable, not Exception. The contract above is that an oidc:
@@ -280,13 +272,4 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         return new LoginStatus(Status.FAIL, message);
     }
 
-    private String hash(String value) {
-        try {
-            return HexFormat.of()
-                    .formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)))
-                    .substring(0, 16);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
-    }
 }

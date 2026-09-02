@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -20,6 +21,7 @@ import static org.mockito.Mockito.times;
 
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,6 +51,23 @@ class UserProvisionerTest {
         // copies these onto a returning user when they differ.
         profile.setEmail("jdoe@example.test");
         return new ClaimsMapper.Identity("jdoe", SUBJECT, profile, List.of());
+    }
+
+    /**
+     * Models the engine's user table for the paths that WRITE to it: a lookup
+     * for "jdoe" misses until {@code updateUser} lands, and hits afterwards.
+     *
+     * <p>Replaces {@code thenReturn(null).thenReturn(user)}, which said "the
+     * SECOND getUser call sees the user" — a fact about how many times the
+     * implementation happens to look up, not about the directory. Adding or
+     * removing a single lookup silently shifted which call each fixture was
+     * answering, and the assertions would keep passing while describing
+     * something else entirely.</p>
+     */
+    private void directoryGains(User created) throws Exception {
+        AtomicBoolean present = new AtomicBoolean(false);
+        when(users.getUser(null, "jdoe")).thenAnswer(call -> present.get() ? created : null);
+        doAnswer(call -> { present.set(true); return null; }).when(users).updateUser(any(User.class));
     }
 
     private static OidcConfig config(boolean jit, String linkedAccounts) {
@@ -118,7 +137,7 @@ class UserProvisionerTest {
 
     @Test
     void provisionsAndBindsAnUnknownUserWhenJitIsOn() throws Exception {
-        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(existing);
+        directoryGains(existing);
 
         UserProvisioner.Result result = new UserProvisioner(users).provision(identity(), config(true, ""));
         assertTrue(result.created());
@@ -139,7 +158,7 @@ class UserProvisionerTest {
         renamed.setId(7);
         renamed.setUsername("jroe");                       // the old engine name
         // Absent until the rename lands, then found under the new name.
-        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(existing);
+        directoryGains(existing);
         when(users.getAllUsers()).thenReturn(List.of(renamed));
         when(users.getUserPreference(7, UserProvisioner.BINDING)).thenReturn(SUBJECT);
 
@@ -164,7 +183,7 @@ class UserProvisionerTest {
         User afterRename = new User();
         afterRename.setId(4242);
         afterRename.setUsername("jdoe");
-        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(afterRename);
+        directoryGains(afterRename);
         when(users.getAllUsers()).thenReturn(List.of(renamed));
         when(users.getUserPreference(4242, UserProvisioner.BINDING)).thenReturn(SUBJECT);
 
@@ -227,7 +246,7 @@ class UserProvisionerTest {
      */
     @Test
     void marksFirstLoginSettledSoNoClientAsksAnSsoUserForAPassword() throws Exception {
-        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(existing);
+        directoryGains(existing);
 
         new UserProvisioner(users).provision(identity(), config(true, ""));
 
@@ -258,7 +277,9 @@ class UserProvisionerTest {
     @Test
     void survivesAnInsertRace() throws Exception {
         // Two first logins race the same insert; the loser's updateUser throws
-        // but the row is there on re-read.
+        // but the row is there on re-read. The two-call sequence IS the point
+        // here — the row appears because the WINNER inserted it, not because
+        // this thread did — so directoryGains() would model the wrong thing.
         when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(existing);
         org.mockito.Mockito.doThrow(new RuntimeException("duplicate"))
                 .when(users).updateUser(any(User.class));
@@ -270,7 +291,8 @@ class UserProvisionerTest {
 
     @Test
     void failsClosedWhenTheRaceLeavesNoRow() throws Exception {
-        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(null);
+        // Never there, however many times it looks.
+        when(users.getUser(null, "jdoe")).thenReturn(null);
 
         assertThrows(SecurityException.class,
                 () -> new UserProvisioner(users).provision(identity(), config(true, "")));
