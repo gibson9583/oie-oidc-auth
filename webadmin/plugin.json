@@ -1,1 +1,1 @@
-{"id":"oidcauth","name":"OIDC Authentication","version":"0.1.0","author":"Open Integration Engine","description":"Permission-gated OIDC authentication policy settings.","oie":{"apiMin":"4.6"},"client":{"entry":"web/plugin.js"}}
+{"id":"oidcauth","name":"OIDC Authentication","version":"1.0.0","author":"Open Integration Engine","description":"Permission-gated OIDC authentication policy settings.","oie":{"apiMin":"4.6"},"client":{"entry":"web/plugin.js"}}
