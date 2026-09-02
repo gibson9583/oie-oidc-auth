@@ -227,8 +227,9 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             UserProvisioner.Result provisioned =
                     new UserProvisioner(UserController.getInstance()).provision(identity, config);
             roles.assign(provisioned.user().getId(), provisioned.created(), identity, config);
-            log.info("OIDC login accepted for user '{}' subject hash {}", identity.username(),
-                    ReplayCache.hash(identity.subject()));
+            // The engine's own event log records every login; this is for a
+            // debugger, not an operator's log.
+            log.debug("OIDC login accepted for user '{}'", identity.username());
             return new LoginStatus(Status.SUCCESS, null, identity.username());
         } catch (Throwable e) {
             // Throwable, not Exception. The contract above is that an oidc:
