@@ -16,6 +16,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
 
 import java.util.List;
 import java.util.Properties;
@@ -44,6 +45,9 @@ class UserProvisionerTest {
     private static ClaimsMapper.Identity identity() {
         User profile = new User();
         profile.setUsername("jdoe");
+        // The IdP-owned profile fields a real token carries; refreshProfile
+        // copies these onto a returning user when they differ.
+        profile.setEmail("jdoe@example.test");
         return new ClaimsMapper.Identity("jdoe", SUBJECT, profile, List.of());
     }
 
@@ -72,6 +76,11 @@ class UserProvisionerTest {
 
         assertThrows(SecurityException.class,
                 () -> new UserProvisioner(users).provision(identity(), config(true, "")));
+        // Nothing is written on a refused login. The profile refresh once ran
+        // BEFORE these checks, so anyone the IdP would issue a token for could
+        // claim preferred_username=admin and overwrite the real administrator's
+        // name, email and organization — on a login the engine then refused.
+        verify(users, never()).updateUser(any(User.class));
     }
 
     @Test
@@ -84,6 +93,7 @@ class UserProvisionerTest {
         assertThrows(SecurityException.class,
                 () -> new UserProvisioner(users).provision(identity(), config(true, "")));
         verify(users, never()).setUserPreference(any(), any(), any());
+        verify(users, never()).updateUser(any(User.class));
     }
 
     @Test
@@ -114,6 +124,100 @@ class UserProvisionerTest {
         assertTrue(result.created());
         verify(users).updateUser(any(User.class));
         verify(users).setUserPreference(eq(7), eq(UserProvisioner.BINDING), eq(SUBJECT));
+    }
+
+    /**
+     * The IdP renamed someone. Looking up by username alone misses, and JIT
+     * would create a SECOND account bound to the same subject — orphaning the
+     * first, which stays bound and becomes loginable again if the old name is
+     * ever reissued. The subject binding is authoritative, so the account
+     * follows the IdP instead.
+     */
+    @Test
+    void renamesTheBoundAccountWhenTheIdpChangesTheUsername() throws Exception {
+        User renamed = new User();
+        renamed.setId(7);
+        renamed.setUsername("jroe");                       // the old engine name
+        // Absent until the rename lands, then found under the new name.
+        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(existing);
+        when(users.getAllUsers()).thenReturn(List.of(renamed));
+        when(users.getUserPreference(7, UserProvisioner.BINDING)).thenReturn(SUBJECT);
+
+        UserProvisioner.Result result = new UserProvisioner(users).provision(identity(), config(true, ""));
+
+        assertFalse(result.created(), "an existing account was renamed, not provisioned");
+        assertEquals("jdoe", renamed.getUsername());
+        verify(users).updateUser(renamed);
+    }
+
+    /**
+     * Same rename, at IDs above the Integer cache. Every other fixture here uses
+     * single-digit ids, which are interned — so an identity comparison written
+     * as {@code !=} would pass those and fail only in production, where user ids
+     * routinely exceed 127.
+     */
+    @Test
+    void renamesCorrectlyAtIdsAboveTheIntegerCache() throws Exception {
+        User renamed = new User();
+        renamed.setId(4242);
+        renamed.setUsername("jroe");
+        User afterRename = new User();
+        afterRename.setId(4242);
+        afterRename.setUsername("jdoe");
+        when(users.getUser(null, "jdoe")).thenReturn(null).thenReturn(afterRename);
+        when(users.getAllUsers()).thenReturn(List.of(renamed));
+        when(users.getUserPreference(4242, UserProvisioner.BINDING)).thenReturn(SUBJECT);
+
+        UserProvisioner.Result result = new UserProvisioner(users).provision(identity(), config(true, ""));
+
+        assertFalse(result.created());
+        assertEquals("jdoe", renamed.getUsername());
+    }
+
+    /**
+     * Renaming into a name somebody else already holds would merge two
+     * identities, which is not a decision to make during a login.
+     */
+    @Test
+    void refusesTheRenameWhenTheNewUsernameIsTaken() throws Exception {
+        User boundElsewhere = new User();
+        boundElsewhere.setId(9);
+        boundElsewhere.setUsername("jroe");
+        User occupant = new User();
+        occupant.setId(11);
+        occupant.setUsername("jdoe");
+        // The occupant is what a real getUser returns for this username — every
+        // time, not once. The subject search therefore runs from the HIT path,
+        // which is the only place this collision is visible.
+        when(users.getUser(null, "jdoe")).thenReturn(occupant);
+        when(users.getAllUsers()).thenReturn(List.of(boundElsewhere, occupant));
+        when(users.getUserPreference(9, UserProvisioner.BINDING)).thenReturn(SUBJECT);
+        when(users.getUserPreference(11, UserProvisioner.BINDING)).thenReturn(null);
+
+        assertThrows(SecurityException.class,
+                () -> new UserProvisioner(users).provision(identity(), config(true, "")));
+        verify(users, never()).updateUser(any(User.class));
+    }
+
+    /**
+     * A returning user's profile follows the IdP — otherwise an email or name
+     * changed there stays stale in the engine forever, and the engine's audit
+     * log is where people read it from. Only on an actual difference, so an
+     * unchanged login costs no write.
+     */
+    @Test
+    void refreshesProfileFieldsOnReLoginOnlyWhenTheyDiffer() throws Exception {
+        existing.setEmail("old@example.test");
+        when(users.getUser(null, "jdoe")).thenReturn(existing);
+        when(users.getUserPreference(7, UserProvisioner.BINDING)).thenReturn(SUBJECT);
+
+        new UserProvisioner(users).provision(identity(), config(true, ""));
+        assertEquals("jdoe@example.test", existing.getEmail());
+        verify(users).updateUser(existing);
+
+        // Second login, nothing changed at the IdP: no further write.
+        new UserProvisioner(users).provision(identity(), config(true, ""));
+        verify(users, times(1)).updateUser(existing);
     }
 
     /**

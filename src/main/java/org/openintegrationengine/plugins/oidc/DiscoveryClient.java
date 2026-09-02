@@ -38,6 +38,66 @@ public final class DiscoveryClient {
         this.http = http;
     }
 
+    /**
+     * Fetches the JWKS the discovery document points at and returns how many
+     * keys it holds. Discovery alone proves only that the document parses —
+     * "Test connection" reporting success while the key set is unreachable
+     * (firewall, wrong host, empty JWKS) means the first real login is what
+     * discovers the problem, which is the opposite of what a test is for.
+     */
+    public int probeKeys(OidcConfig config, Metadata metadata) throws Exception {
+        // jwks_uri comes from the REMOTE discovery document, not from operator
+        // input, so re-check the scheme here rather than trusting that get()
+        // already did — this method is one call away from being reused.
+        OidcConfig.requireHttps(metadata.jwksUri(), "jwks_uri");
+        HttpRequest request = HttpRequest.newBuilder(URI.create(metadata.jwksUri()))
+                .timeout(Duration.ofSeconds(10))
+                .header("Accept", "application/json")
+                .build();
+        // Bounded: the request timeout covers response HEADERS, not the body, so
+        // an endpoint that trickles bytes could hold this thread indefinitely and
+        // grow the heap — and the URL it points at is chosen remotely.
+        HttpResponse<String> response = http.send(request, bounded());
+        if (response.statusCode() != 200) {
+            throw new IOException("JWKS fetch failed with HTTP " + response.statusCode() + " at " + metadata.jwksUri());
+        }
+        JsonNode keys = json.readTree(response.body()).path("keys");
+        if (!keys.isArray() || keys.isEmpty()) {
+            throw new IOException("JWKS at " + metadata.jwksUri() + " contains no keys");
+        }
+        // Count only keys that could actually verify a token under this policy.
+        // A JWKS of encryption-only or symmetric keys is reachable and parses,
+        // yet every real login still fails — reporting "3 keys" there is exactly
+        // the false confidence this probe exists to remove.
+        int usable = 0;
+        for (JsonNode key : keys) {
+            String use = key.path("use").asText("");
+            String alg = key.path("alg").asText("");
+            boolean signing = use.isEmpty() || "sig".equals(use);
+            boolean allowed = alg.isEmpty() || config.allowedAlgorithms().contains(alg);
+            if (signing && allowed && !"oct".equals(key.path("kty").asText(""))) {
+                usable++;
+            }
+        }
+        if (usable == 0) {
+            throw new IOException("JWKS at " + metadata.jwksUri()
+                    + " has no signing keys matching allowed-algorithms " + config.allowedAlgorithms());
+        }
+        return usable;
+    }
+
+    /** Reads at most 1 MiB — a JWKS is kilobytes; anything larger is not one. */
+    private static HttpResponse.BodyHandler<String> bounded() {
+        return info -> HttpResponse.BodySubscribers.mapping(
+                HttpResponse.BodySubscribers.ofByteArray(),
+                bytes -> {
+                    if (bytes.length > 1024 * 1024) {
+                        throw new IllegalStateException("JWKS response exceeded 1 MiB");
+                    }
+                    return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                });
+    }
+
     public synchronized Metadata get(OidcConfig config) throws Exception {
         if (cached != null && expires > System.currentTimeMillis()) {
             return cached;

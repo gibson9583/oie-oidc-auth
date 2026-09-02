@@ -57,6 +57,8 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     private volatile Properties properties = new Properties();
     private volatile OidcConfig config;
     private volatile OidcTokenValidator validator;
+    /** Why the last apply() rejected the policy, or null if it took. */
+    private volatile String lastError;
     private final ConcurrentMap<String, Long> seen = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Deque<Long>> attempts = new ConcurrentHashMap<>();
     private final ClaimsMapper mapper = new ClaimsMapper();
@@ -128,8 +130,16 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         } catch (Exception e) {
             config = null;
             validator = null;
+            // Kept so the settings tab can SAY this, rather than showing the
+            // stored properties as though they were in force. A policy that
+            // fails to parse otherwise presents as healthy — "Enable OIDC login"
+            // ticked — while the engine serves configured:false and every SSO
+            // attempt is told the feature is switched off.
+            lastError = e.getMessage() != null ? e.getMessage() : e.toString();
             log.warn("OIDC authentication is not configured: {}", e.getMessage());
+            return;
         }
+        lastError = null;
     }
 
     /** The active stored policy (pre-override), for the admin servlet's GET. */
@@ -142,6 +152,22 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     static OidcConfig currentConfig() {
         OidcAuthorizationPlugin current = instance;
         return current != null ? current.config : null;
+    }
+
+    /** Why the stored policy is not in force, or null. For the settings tab. */
+    static String currentError() {
+        OidcAuthorizationPlugin current = instance;
+        return current != null ? current.lastError : null;
+    }
+
+    /**
+     * Whether the emergency switch is on. Static so the servlet can report it:
+     * the switch is checked per login, but a login screen that keeps offering
+     * SSO while every attempt is refused is the wrong way to find that out.
+     */
+    static boolean killSwitchActive() {
+        return Boolean.getBoolean("org.openintegrationengine.oidc.disabled")
+                || "true".equalsIgnoreCase(System.getenv("OIE_OIDC_DISABLED"));
     }
 
     static void applyToInstance(Properties stored) {
@@ -158,8 +184,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     }
 
     private boolean disabled() {
-        return Boolean.getBoolean("org.openintegrationengine.oidc.disabled")
-                || "true".equalsIgnoreCase(System.getenv("OIE_OIDC_DISABLED"));
+        return killSwitchActive();
     }
 
     @Override

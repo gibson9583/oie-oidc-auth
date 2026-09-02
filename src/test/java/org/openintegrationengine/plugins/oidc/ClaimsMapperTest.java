@@ -78,6 +78,48 @@ class ClaimsMapperTest {
         assertEquals(List.of("Editor", "offline_access"), identity.roles());
     }
 
+    /**
+     * A scalar role claim is delimited in practice — providers emit
+     * "admins,auditors", and scope-style claims are space-separated. Added
+     * verbatim it becomes one token matching no roles.map entry and no role
+     * name, so the whole mapping silently does nothing and looks exactly like a
+     * missing claim.
+     */
+    @Test
+    void splitsDelimitedScalarRoleClaims() throws Exception {
+        assertEquals(List.of("admins", "auditors"), new ClaimsMapper().map(
+                claims().claim("preferred_username", "jdoe").claim("groups", "admins,auditors").build(),
+                rolesFrom("groups")).roles());
+
+        // Scope-style, space delimited.
+        assertEquals(List.of("admins", "auditors"), new ClaimsMapper().map(
+                claims().claim("preferred_username", "jdoe").claim("groups", "admins auditors").build(),
+                rolesFrom("groups")).roles());
+
+        // Mixed separators and stray whitespace collapse the same way.
+        assertEquals(List.of("admins", "auditors"), new ClaimsMapper().map(
+                claims().claim("preferred_username", "jdoe").claim("groups", " admins ,  auditors ").build(),
+                rolesFrom("groups")).roles());
+
+        // A single value is still a single role.
+        assertEquals(List.of("admins"), new ClaimsMapper().map(
+                claims().claim("preferred_username", "jdoe").claim("groups", "admins").build(),
+                rolesFrom("groups")).roles());
+    }
+
+    /**
+     * An ARRAY claim is already a list, so each element is one role verbatim —
+     * splitting there would corrupt a role whose name legitimately contains a
+     * comma or a space.
+     */
+    @Test
+    void doesNotSplitElementsOfAnArrayRoleClaim() throws Exception {
+        assertEquals(List.of("Site Administrators", "a,b"), new ClaimsMapper().map(
+                claims().claim("preferred_username", "jdoe")
+                        .claim("groups", List.of("Site Administrators", "a,b")).build(),
+                rolesFrom("groups")).roles());
+    }
+
     /** Keycloak's client roles: two levels deep, keyed by client id. */
     @Test
     void readsRolesFromADeeplyNestedPerClientPath() throws Exception {

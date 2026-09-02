@@ -104,6 +104,23 @@ public final class OidcConfigLoader {
         return properties;
     }
 
+    /**
+     * Policy keys an operator has pinned through the environment or a system
+     * property. Derived from the PRESENCE of an override, not from a value
+     * difference: a pin whose value happens to match what is stored is still a
+     * pin, and an edit to it will still never take effect.
+     */
+    static java.util.Set<String> pinned() {
+        java.util.Set<String> keys = new java.util.LinkedHashSet<>();
+        for (String key : DEFAULTS.keySet()) {
+            if (System.getProperty("org.openintegrationengine.oidc." + key) != null
+                    || System.getenv("OIE_OIDC_" + key.toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_')) != null) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
     /** The stored policy plus operator pins — what the engine actually enforces. */
     static Properties withOverrides(Properties stored) {
         Properties p = new Properties();

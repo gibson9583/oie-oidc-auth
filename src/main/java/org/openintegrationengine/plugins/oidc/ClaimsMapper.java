@@ -54,11 +54,29 @@ public final class ClaimsMapper {
         Object roleClaim = claimAt(claims, config.rolesClaim());
         List<String> roles = new ArrayList<>();
         if (roleClaim instanceof Collection<?> all) {
+            // Already a list — each element is one role, verbatim. A value that
+            // happens to contain a comma is that role's actual name.
             for (Object value : all) {
                 roles.add(String.valueOf(value));
             }
         } else if (roleClaim != null) {
-            roles.add(String.valueOf(roleClaim));
+            // A SCALAR claim is delimited in practice: providers emit
+            // "admins,auditors", and scope-style claims are space-separated.
+            // Added verbatim it becomes one token that matches no roles.map
+            // entry and no role name, so the whole mapping silently does
+            // nothing — the failure looks identical to "the claim is missing".
+            //
+            // Comma wins when present, and whitespace is only a separator in its
+            // absence. Splitting on both unconditionally would break every role
+            // whose NAME contains a space — "Site Administrators", "Read Only" —
+            // turning one silent mapping failure into another for configurations
+            // that worked before.
+            String scalar = String.valueOf(roleClaim).trim();
+            for (String part : scalar.split(scalar.indexOf(',') >= 0 ? "\\s*,\\s*" : "\\s+")) {
+                if (!part.isBlank()) {
+                    roles.add(part.trim());
+                }
+            }
         }
 
         return new Identity(username, claims.getIssuer() + "#" + claims.getSubject(), profile, roles);

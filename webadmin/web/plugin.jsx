@@ -83,7 +83,16 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  const save=React.useCallback(async()=>{
   const blocking=Object.values(problemsRef.current).filter(Boolean);
   if(blocking.length){toast(blocking[0],'error');return false;}
-  try{await api.put(`${EXT}/configuration`,{string:JSON.stringify(form)});setForm(decode(await api.get(`${EXT}/configuration`)));toast('OIDC configuration saved.','success');markClean();return true;}catch(e){toast(e.message||'OIDC configuration could not be saved.','error');return false;}},[form,markClean]);
+  try{await api.put(`${EXT}/configuration`,{string:JSON.stringify(form)});}
+  catch(e){toast(e.message||'OIDC configuration could not be saved.','error');return false;}
+  // The PUT succeeded. The re-read below is how the form comes to show what the
+  // engine actually kept, but it is a SEPARATE request — failing it does not
+  // un-save anything, and reporting an error here told the operator their change
+  // was lost when it had landed. Say what is true: saved, display may be stale.
+  markClean();
+  try{setForm(decode(await api.get(`${EXT}/configuration`)));toast('OIDC configuration saved.','success');}
+  catch(e){toast(`OIDC configuration saved, but the tab could not re-read it: ${e.message||'refresh to confirm.'}`,'warn');}
+  return true;},[form,markClean]);
  const saveRef=React.useRef(save);saveRef.current=save;
  // Fetch exactly once per mount; the Refresh task re-runs it on demand.
  // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -93,13 +102,28 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  React.useEffect(()=>{setTasks('OIDC Authentication Tasks',[
   taskButton('Save','save',()=>saveRef.current(),{primary:true,task:'doSave',group:'settings_OIDC Authentication'}),
   taskButton('Refresh','refresh',load),
-  taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));toast(`OIDC discovery succeeded: ${r.issuer||'issuer verified'}`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
+  taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));toast(`OIDC verified: ${r.issuer||'issuer'} — ${r.keyCount||0} signing key(s) reachable`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
  ]);},[load,setTasks]);
  React.useEffect(()=>setSave(()=>save),[save,setSave]);const patch=(key,value)=>{setForm(f=>({...f,[key]:value}));markDirty();};
  if(error)return <div className="p-4" style={{color:'var(--err)'}}>{error}</div>;if(!form)return <div className="p-4 text-text-faint">Loading…</div>;
+ // Effective state the stored policy cannot express (see the servlet's reserved
+ // "_" keys): an emergency switch thrown outside the UI, and a policy the engine
+ // rejected at load. Both leave the checkbox below ticked while SSO is in fact
+ // off, which is the state most likely to be misread as healthy.
+ const pinned=Array.isArray(form._pinned)?form._pinned:[];
  return <div className="p-4" style={{maxWidth:820}}>
+ {String(form._killSwitch)==='true'?<div className="mb-4 p-2" style={{border:'1px solid var(--err)',borderRadius:6,color:'var(--err)'}}>
+  <strong>SSO is switched off by the emergency kill switch.</strong> The engine is refusing every OIDC sign-in and no longer advertises SSO to the login screen, whatever this form says. Clear <code>OIE_OIDC_DISABLED</code> (or the <code>org.openintegrationengine.oidc.disabled</code> system property) and restart to re-enable.
+ </div>:null}
+ {form._error?<div className="mb-4 p-2" style={{border:'1px solid var(--err)',borderRadius:6,color:'var(--err)'}}>
+  <strong>This policy is not in force.</strong> The engine rejected it at load: {form._error} Until it parses, the login screen offers no SSO button and sign-in attempts are told SSO is disabled.
+ </div>:null}
+ {pinned.length?<div className="mb-4 p-2" style={{border:'1px solid var(--line)',borderRadius:6}}>
+  Pinned by the operator environment — an <code>OIE_OIDC_*</code> variable or system property overrides these, so they are shown read-only and saving leaves the stored policy untouched: <strong>{pinned.join(', ')}</strong>
+ </div>:null}
+ <div className="mb-4 text-text-faint" style={{fontSize:12}}>Redirect URI to register with your provider: <code>{form._redirectUri||'<web-administrator-origin>/oidc/callback'}</code></div>
  <div className="mb-4"><label className="check"><input type="checkbox" checked={String(form.enabled)==='true'} onChange={e=>patch('enabled',String(e.target.checked))}/>Enable OIDC login</label></div>
- <div className="grid grid-cols-2 gap-4">{fields.map(([key,label,type])=><div className="field" key={key}><label>{label}</label><input type={type} value={form[key]||''} onChange={e=>patch(key,e.target.value)} disabled={String(form.enabled)!=='true'}/></div>)}
+ <div className="grid grid-cols-2 gap-4">{fields.map(([key,label,type])=><div className="field" key={key}><label>{label}{pinned.includes(key)?<span className="text-text-faint" style={{fontWeight:'normal'}}> — pinned</span>:null}</label><input type={type} value={form[key]||''} onChange={e=>patch(key,e.target.value)} disabled={String(form.enabled)!=='true'||pinned.includes(key)}/></div>)}
  <div className="field"><label>JIT provision unknown users</label><select value={form['jit.enabled']||'false'} onChange={e=>patch('jit.enabled',e.target.value)} disabled={String(form.enabled)!=='true'}><option value="true">Yes</option><option value="false">No</option></select></div>
  <div className="field"><label>Role synchronization</label><select value={form['roles.sync']||'always'} onChange={e=>patch('roles.sync',e.target.value)} disabled={String(form.enabled)!=='true'}><option value="always">Every login</option><option value="jit-only">JIT only</option><option value="never">Never</option></select></div>
  <div className="field"><label>Infer roles by name</label><select value={form['roles.infer']||'false'} onChange={e=>patch('roles.infer',e.target.value)} disabled={String(form.enabled)!=='true'}><option value="false">No — mapped claims only</option><option value="true">Yes — claim values matching a role name</option></select></div></div>
