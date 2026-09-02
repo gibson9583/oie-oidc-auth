@@ -4,6 +4,18 @@
 # org.openintegrationengine.oidc.* system property (dots/hyphens become
 # underscores in env names); such overrides pin the value over the stored
 # policy and are how automated deployments provision SSO.
+#
+# The README's "Policy keys" table is the authoritative version of this list,
+# with defaults and meanings. This file mirrors it in properties form.
+#
+# NOT a policy key, and the one that matters most in an incident:
+#   OIE_OIDC_DISABLED=true
+# is the emergency switch. It refuses every OIDC sign-in and stops the login
+# screen advertising SSO whatever the stored policy says, needing neither the
+# database nor the UI. Mind the polarity - it is the INVERSE of the "enabled"
+# key below. OIE_OIDC_DISABLED=true and OIE_OIDC_ENABLED=false both switch SSO
+# off, but the first overrides without touching the policy and reports itself
+# in the settings tab, while the second pins the policy key.
 enabled=true
 discovery-url=https://identity.example.com/.well-known/openid-configuration
 client-id=oie-web-administrator
