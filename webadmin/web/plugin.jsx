@@ -1,11 +1,5 @@
 import { platform } from '@oie/web-shell';
 const React=platform.React,api=platform.api;const {toast,taskButton}=platform.ui;const EXT='/extensions/oidcauth';
-const fields=[
- ['discovery-url','Discovery URL','url'],['client-id','Client ID','text'],['username-claim','Username claim','text'],['username-prefix','Username prefix','text'],
- ['jit.email-claim','Email claim','text'],['jit.name-claim','Name claim','text'],['jit.organization-claim','Organization claim','text'],
- ['allowed-algorithms','Allowed algorithms','text'],['clock-skew-seconds','Clock skew (seconds)','number'],['max-token-age-seconds','Maximum token age (seconds)','number'],['jwks-cache-ttl-seconds','JWKS cache TTL (seconds)','number'],
- ['roles.claim','Roles claim','text'],['roles.default','Default role','text']
-];
 // The wire format for map-shaped policy is comma-joined key=value; editing that
 // by hand is error-prone, so render rows and serialize on the way out.
 // Rows carry a stable id. Keying by array index remounts every row below a
@@ -15,6 +9,15 @@ let nextRowId=0;
 // Split on the FIRST '=' only: a key cannot contain one, but a value routinely
 // does — a linked-accounts subject is `issuer#subject`, and base64url subjects
 // carry '=' padding. Stripping it from input made those unenterable.
+// The schema carries values; these are the words an operator reads for them.
+// Anything unlisted falls back to the raw value, so adding a choice engine-side
+// shows up here immediately rather than rendering blank.
+const CHOICE_LABELS={'jit.enabled':{true:'Yes',false:'No'},'roles.infer':{false:'No — mapped claims only',true:'Yes — claim values matching a role name'},'roles.sync':{always:'Every login','jit-only':'JIT only',never:'Never'}};
+const choiceLabel=(key,value)=>(CHOICE_LABELS[key]&&CHOICE_LABELS[key][value])||value;
+// The engine parses booleans strictly, so mirror it rather than treating every
+// unrecognized value as false — a policy the engine rejects should not render
+// as a confidently unticked box.
+const truthy=(value)=>['true','yes','on','1'].includes(String(value==null?'':value).trim().toLowerCase());
 const parsePairs=(value)=>String(value||'').split(',').map(s=>s.trim()).filter(Boolean).map(item=>{const i=item.indexOf('=');return {id:++nextRowId,...(i>0?{k:item.slice(0,i).trim(),v:item.slice(i+1).trim()}:{k:item.trim(),v:''})};});
 const serializePairs=(rows)=>rows.filter(r=>r.k.trim()&&r.v.trim()).map(r=>`${r.k.trim()}=${r.v.trim()}`).join(',');
 // What serializePairs would silently discard, said out loud. A half-filled row
@@ -111,6 +114,11 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  // rejected at load. Both leave the checkbox below ticked while SSO is in fact
  // off, which is the state most likely to be misread as healthy.
  const pinned=Array.isArray(form._pinned)?form._pinned:[];
+ const schema=Array.isArray(form._schema)?form._schema:[];
+ // The single answer to "can this be edited?": not while the policy is off, and
+ // never for a key the operator pinned outside the database.
+ const locked=(key)=>(key!=='enabled'&&!truthy(form.enabled))||pinned.includes(key);
+ const pinnedNote=(key)=>pinned.includes(key)?<span className="text-text-faint" style={{fontWeight:'normal'}}> — pinned</span>:null;
  return <div className="p-4" style={{maxWidth:820}}>
  {String(form._killSwitch)==='true'?<div className="mb-4 p-2" style={{border:'1px solid var(--err)',borderRadius:6,color:'var(--err)'}}>
   <strong>SSO is switched off by the emergency kill switch.</strong> The engine is refusing every OIDC sign-in and no longer advertises SSO to the login screen, whatever this form says. Clear <code>OIE_OIDC_DISABLED</code> (or the <code>org.openintegrationengine.oidc.disabled</code> system property) and restart to re-enable.
@@ -122,18 +130,32 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
   Pinned by the operator environment — an <code>OIE_OIDC_*</code> variable or system property overrides these, so they are shown read-only and saving leaves the stored policy untouched: <strong>{pinned.join(', ')}</strong>
  </div>:null}
  <div className="mb-4 text-text-faint" style={{fontSize:12}}>Redirect URI to register with your provider: <code>{form._redirectUri||'<web-administrator-origin>/oidc/callback'}</code></div>
- <div className="mb-4"><label className="check"><input type="checkbox" checked={String(form.enabled)==='true'} onChange={e=>patch('enabled',String(e.target.checked))}/>Enable OIDC login</label></div>
- <div className="grid grid-cols-2 gap-4">{fields.map(([key,label,type])=><div className="field" key={key}><label>{label}{pinned.includes(key)?<span className="text-text-faint" style={{fontWeight:'normal'}}> — pinned</span>:null}</label><input type={type} value={form[key]||''} onChange={e=>patch(key,e.target.value)} disabled={String(form.enabled)!=='true'||pinned.includes(key)}/></div>)}
- <div className="field"><label>JIT provision unknown users</label><select value={form['jit.enabled']||'false'} onChange={e=>patch('jit.enabled',e.target.value)} disabled={String(form.enabled)!=='true'}><option value="true">Yes</option><option value="false">No</option></select></div>
- <div className="field"><label>Role synchronization</label><select value={form['roles.sync']||'always'} onChange={e=>patch('roles.sync',e.target.value)} disabled={String(form.enabled)!=='true'}><option value="always">Every login</option><option value="jit-only">JIT only</option><option value="never">Never</option></select></div>
- <div className="field"><label>Infer roles by name</label><select value={form['roles.infer']||'false'} onChange={e=>patch('roles.infer',e.target.value)} disabled={String(form.enabled)!=='true'}><option value="false">No — mapped claims only</option><option value="true">Yes — claim values matching a role name</option></select></div></div>
- <div className="mt-4" style={{maxWidth:560}}>
-  <PairEditor label="Claim-to-role mappings" value={form['roles.map']||''} disabled={String(form.enabled)!=='true'}
-   keyPlaceholder="claim value (e.g. oie-admins)" valuePlaceholder="RBAC role (e.g. Administrator)" addLabel="Add mapping"
-   onChange={v=>patch('roles.map',v)} onProblem={noteProblem('roles.map')}/>
-  <PairEditor label="Linked accounts" value={form['linked-accounts']||''} disabled={String(form.enabled)!=='true'}
-   keyPlaceholder="engine username" valuePlaceholder="issuer#subject" addLabel="Link account"
-   onChange={v=>patch('linked-accounts',v)} onProblem={noteProblem('linked-accounts')}/>
+ {/* Every control below derives from the schema the engine sent, so "is this
+     field editable?" is answered in ONE place. The tab used to keep its own
+     field list beside hand-written disabled= expressions, and they disagreed:
+     five of six controls ignored pinning entirely, so an operator could tick
+     "Enable OIDC login" against an OIE_OIDC_ENABLED=false pin, get a success
+     toast, and watch the re-read silently revert it — the exact failure the
+     pinned banner claims to prevent. */}
+ {schema.filter(f=>f.key==='enabled').map(f=><div className="mb-4" key={f.key}>
+  <label className="check"><input type="checkbox" checked={truthy(form.enabled)} disabled={locked(f.key)}
+   onChange={e=>patch('enabled',String(e.target.checked))}/>{f.label}{pinnedNote(f.key)}</label>
+ </div>)}
+ <div className="grid grid-cols-2 gap-4">{schema.filter(f=>f.key!=='enabled'&&f.kind!=='pairs').map(f=>
+  <div className="field" key={f.key}><label>{f.label}{pinnedNote(f.key)}</label>
+   {f.kind==='boolean'||f.kind==='enum'
+    ? <select value={form[f.key]||''} disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}>
+       {(f.kind==='boolean'?['true','false']:f.choices||[]).map(c=><option key={c} value={c}>{choiceLabel(f.key,c)}</option>)}
+      </select>
+    : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''}
+       disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}/>}
+  </div>)}</div>
+ <div className="mt-4" style={{maxWidth:560}}>{schema.filter(f=>f.kind==='pairs').map(f=>
+  <PairEditor key={f.key} label={f.label+(pinned.includes(f.key)?' — pinned':'')} value={form[f.key]||''}
+   disabled={locked(f.key)} addLabel={f.key==='roles.map'?'Add mapping':'Link account'}
+   keyPlaceholder={f.key==='roles.map'?'claim value (e.g. oie-admins)':'engine username'}
+   valuePlaceholder={f.key==='roles.map'?'RBAC role (e.g. Administrator)':'issuer#subject'}
+   onChange={v=>patch(f.key,v)} onProblem={noteProblem(f.key)}/>)}
  </div>
  </div>}
 export async function register(host){

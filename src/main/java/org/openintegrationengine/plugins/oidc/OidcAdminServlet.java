@@ -89,6 +89,20 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
             for (String key : OidcConfigLoader.pinned()) {
                 out.withArray("_pinned").add(key);
             }
+            // The schema itself, so the tab renders from the same declaration the
+            // engine validates against. Previously the tab kept its own field
+            // list, which is how it came to honour pinning on a third of its
+            // controls: the list and the pin logic were maintained by hand, in
+            // two places, and quietly disagreed.
+            for (PolicySchema.Key key : PolicySchema.KEYS) {
+                ObjectNode field = out.withArray("_schema").addObject();
+                field.put("key", key.name());
+                field.put("label", key.label());
+                field.put("kind", key.kind().name().toLowerCase(java.util.Locale.ROOT));
+                if (!key.choices().isEmpty()) {
+                    key.choices().forEach(choice -> field.withArray("choices").add(choice));
+                }
+            }
             return JSON.writeValueAsString(out);
         } catch (Exception e) {
             throw failure("read", e);

@@ -4,22 +4,10 @@ var React = platform.React;
 var api = platform.api;
 var { toast, taskButton } = platform.ui;
 var EXT = "/extensions/oidcauth";
-var fields = [
-  ["discovery-url", "Discovery URL", "url"],
-  ["client-id", "Client ID", "text"],
-  ["username-claim", "Username claim", "text"],
-  ["username-prefix", "Username prefix", "text"],
-  ["jit.email-claim", "Email claim", "text"],
-  ["jit.name-claim", "Name claim", "text"],
-  ["jit.organization-claim", "Organization claim", "text"],
-  ["allowed-algorithms", "Allowed algorithms", "text"],
-  ["clock-skew-seconds", "Clock skew (seconds)", "number"],
-  ["max-token-age-seconds", "Maximum token age (seconds)", "number"],
-  ["jwks-cache-ttl-seconds", "JWKS cache TTL (seconds)", "number"],
-  ["roles.claim", "Roles claim", "text"],
-  ["roles.default", "Default role", "text"]
-];
 var nextRowId = 0;
+var CHOICE_LABELS = { "jit.enabled": { true: "Yes", false: "No" }, "roles.infer": { false: "No \u2014 mapped claims only", true: "Yes \u2014 claim values matching a role name" }, "roles.sync": { always: "Every login", "jit-only": "JIT only", never: "Never" } };
+var choiceLabel = (key, value) => CHOICE_LABELS[key] && CHOICE_LABELS[key][value] || value;
+var truthy = (value) => ["true", "yes", "on", "1"].includes(String(value == null ? "" : value).trim().toLowerCase());
 var parsePairs = (value) => String(value || "").split(",").map((s) => s.trim()).filter(Boolean).map((item) => {
   const i = item.indexOf("=");
   return { id: ++nextRowId, ...i > 0 ? { k: item.slice(0, i).trim(), v: item.slice(i + 1).trim() } : { k: item.trim(), v: "" } };
@@ -131,31 +119,39 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
   if (error) return /* @__PURE__ */ React.createElement("div", { className: "p-4", style: { color: "var(--err)" } }, error);
   if (!form) return /* @__PURE__ */ React.createElement("div", { className: "p-4 text-text-faint" }, "Loading\u2026");
   const pinned = Array.isArray(form._pinned) ? form._pinned : [];
-  return /* @__PURE__ */ React.createElement("div", { className: "p-4", style: { maxWidth: 820 } }, String(form._killSwitch) === "true" ? /* @__PURE__ */ React.createElement("div", { className: "mb-4 p-2", style: { border: "1px solid var(--err)", borderRadius: 6, color: "var(--err)" } }, /* @__PURE__ */ React.createElement("strong", null, "SSO is switched off by the emergency kill switch."), " The engine is refusing every OIDC sign-in and no longer advertises SSO to the login screen, whatever this form says. Clear ", /* @__PURE__ */ React.createElement("code", null, "OIE_OIDC_DISABLED"), " (or the ", /* @__PURE__ */ React.createElement("code", null, "org.openintegrationengine.oidc.disabled"), " system property) and restart to re-enable.") : null, form._error ? /* @__PURE__ */ React.createElement("div", { className: "mb-4 p-2", style: { border: "1px solid var(--err)", borderRadius: 6, color: "var(--err)" } }, /* @__PURE__ */ React.createElement("strong", null, "This policy is not in force."), " The engine rejected it at load: ", form._error, " Until it parses, the login screen offers no SSO button and sign-in attempts are told SSO is disabled.") : null, pinned.length ? /* @__PURE__ */ React.createElement("div", { className: "mb-4 p-2", style: { border: "1px solid var(--line)", borderRadius: 6 } }, "Pinned by the operator environment \u2014 an ", /* @__PURE__ */ React.createElement("code", null, "OIE_OIDC_*"), " variable or system property overrides these, so they are shown read-only and saving leaves the stored policy untouched: ", /* @__PURE__ */ React.createElement("strong", null, pinned.join(", "))) : null, /* @__PURE__ */ React.createElement("div", { className: "mb-4 text-text-faint", style: { fontSize: 12 } }, "Redirect URI to register with your provider: ", /* @__PURE__ */ React.createElement("code", null, form._redirectUri || "<web-administrator-origin>/oidc/callback")), /* @__PURE__ */ React.createElement("div", { className: "mb-4" }, /* @__PURE__ */ React.createElement("label", { className: "check" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: String(form.enabled) === "true", onChange: (e) => patch("enabled", String(e.target.checked)) }), "Enable OIDC login")), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, fields.map(([key, label, type]) => /* @__PURE__ */ React.createElement("div", { className: "field", key }, /* @__PURE__ */ React.createElement("label", null, label, pinned.includes(key) ? /* @__PURE__ */ React.createElement("span", { className: "text-text-faint", style: { fontWeight: "normal" } }, " \u2014 pinned") : null), /* @__PURE__ */ React.createElement("input", { type, value: form[key] || "", onChange: (e) => patch(key, e.target.value), disabled: String(form.enabled) !== "true" || pinned.includes(key) }))), /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, "JIT provision unknown users"), /* @__PURE__ */ React.createElement("select", { value: form["jit.enabled"] || "false", onChange: (e) => patch("jit.enabled", e.target.value), disabled: String(form.enabled) !== "true" }, /* @__PURE__ */ React.createElement("option", { value: "true" }, "Yes"), /* @__PURE__ */ React.createElement("option", { value: "false" }, "No"))), /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, "Role synchronization"), /* @__PURE__ */ React.createElement("select", { value: form["roles.sync"] || "always", onChange: (e) => patch("roles.sync", e.target.value), disabled: String(form.enabled) !== "true" }, /* @__PURE__ */ React.createElement("option", { value: "always" }, "Every login"), /* @__PURE__ */ React.createElement("option", { value: "jit-only" }, "JIT only"), /* @__PURE__ */ React.createElement("option", { value: "never" }, "Never"))), /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, "Infer roles by name"), /* @__PURE__ */ React.createElement("select", { value: form["roles.infer"] || "false", onChange: (e) => patch("roles.infer", e.target.value), disabled: String(form.enabled) !== "true" }, /* @__PURE__ */ React.createElement("option", { value: "false" }, "No \u2014 mapped claims only"), /* @__PURE__ */ React.createElement("option", { value: "true" }, "Yes \u2014 claim values matching a role name")))), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, /* @__PURE__ */ React.createElement(
+  const schema = Array.isArray(form._schema) ? form._schema : [];
+  const locked = (key) => key !== "enabled" && !truthy(form.enabled) || pinned.includes(key);
+  const pinnedNote = (key) => pinned.includes(key) ? /* @__PURE__ */ React.createElement("span", { className: "text-text-faint", style: { fontWeight: "normal" } }, " \u2014 pinned") : null;
+  return /* @__PURE__ */ React.createElement("div", { className: "p-4", style: { maxWidth: 820 } }, String(form._killSwitch) === "true" ? /* @__PURE__ */ React.createElement("div", { className: "mb-4 p-2", style: { border: "1px solid var(--err)", borderRadius: 6, color: "var(--err)" } }, /* @__PURE__ */ React.createElement("strong", null, "SSO is switched off by the emergency kill switch."), " The engine is refusing every OIDC sign-in and no longer advertises SSO to the login screen, whatever this form says. Clear ", /* @__PURE__ */ React.createElement("code", null, "OIE_OIDC_DISABLED"), " (or the ", /* @__PURE__ */ React.createElement("code", null, "org.openintegrationengine.oidc.disabled"), " system property) and restart to re-enable.") : null, form._error ? /* @__PURE__ */ React.createElement("div", { className: "mb-4 p-2", style: { border: "1px solid var(--err)", borderRadius: 6, color: "var(--err)" } }, /* @__PURE__ */ React.createElement("strong", null, "This policy is not in force."), " The engine rejected it at load: ", form._error, " Until it parses, the login screen offers no SSO button and sign-in attempts are told SSO is disabled.") : null, pinned.length ? /* @__PURE__ */ React.createElement("div", { className: "mb-4 p-2", style: { border: "1px solid var(--line)", borderRadius: 6 } }, "Pinned by the operator environment \u2014 an ", /* @__PURE__ */ React.createElement("code", null, "OIE_OIDC_*"), " variable or system property overrides these, so they are shown read-only and saving leaves the stored policy untouched: ", /* @__PURE__ */ React.createElement("strong", null, pinned.join(", "))) : null, /* @__PURE__ */ React.createElement("div", { className: "mb-4 text-text-faint", style: { fontSize: 12 } }, "Redirect URI to register with your provider: ", /* @__PURE__ */ React.createElement("code", null, form._redirectUri || "<web-administrator-origin>/oidc/callback")), schema.filter((f) => f.key === "enabled").map((f) => /* @__PURE__ */ React.createElement("div", { className: "mb-4", key: f.key }, /* @__PURE__ */ React.createElement("label", { className: "check" }, /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: "checkbox",
+      checked: truthy(form.enabled),
+      disabled: locked(f.key),
+      onChange: (e) => patch("enabled", String(e.target.checked))
+    }
+  ), f.label, pinnedNote(f.key)))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, schema.filter((f) => f.key !== "enabled" && f.kind !== "pairs").map((f) => /* @__PURE__ */ React.createElement("div", { className: "field", key: f.key }, /* @__PURE__ */ React.createElement("label", null, f.label, pinnedNote(f.key)), f.kind === "boolean" || f.kind === "enum" ? /* @__PURE__ */ React.createElement("select", { value: form[f.key] || "", disabled: locked(f.key), onChange: (e) => patch(f.key, e.target.value) }, (f.kind === "boolean" ? ["true", "false"] : f.choices || []).map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, choiceLabel(f.key, c)))) : /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: f.kind === "number" ? "number" : f.kind === "url" ? "url" : "text",
+      value: form[f.key] || "",
+      disabled: locked(f.key),
+      onChange: (e) => patch(f.key, e.target.value)
+    }
+  )))), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, schema.filter((f) => f.kind === "pairs").map((f) => /* @__PURE__ */ React.createElement(
     PairEditor,
     {
-      label: "Claim-to-role mappings",
-      value: form["roles.map"] || "",
-      disabled: String(form.enabled) !== "true",
-      keyPlaceholder: "claim value (e.g. oie-admins)",
-      valuePlaceholder: "RBAC role (e.g. Administrator)",
-      addLabel: "Add mapping",
-      onChange: (v) => patch("roles.map", v),
-      onProblem: noteProblem("roles.map")
+      key: f.key,
+      label: f.label + (pinned.includes(f.key) ? " \u2014 pinned" : ""),
+      value: form[f.key] || "",
+      disabled: locked(f.key),
+      addLabel: f.key === "roles.map" ? "Add mapping" : "Link account",
+      keyPlaceholder: f.key === "roles.map" ? "claim value (e.g. oie-admins)" : "engine username",
+      valuePlaceholder: f.key === "roles.map" ? "RBAC role (e.g. Administrator)" : "issuer#subject",
+      onChange: (v) => patch(f.key, v),
+      onProblem: noteProblem(f.key)
     }
-  ), /* @__PURE__ */ React.createElement(
-    PairEditor,
-    {
-      label: "Linked accounts",
-      value: form["linked-accounts"] || "",
-      disabled: String(form.enabled) !== "true",
-      keyPlaceholder: "engine username",
-      valuePlaceholder: "issuer#subject",
-      addLabel: "Link account",
-      onChange: (v) => patch("linked-accounts", v),
-      onProblem: noteProblem("linked-accounts")
-    }
-  )));
+  ))));
 }
 async function register(host) {
   try {

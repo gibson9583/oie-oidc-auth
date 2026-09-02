@@ -32,31 +32,13 @@ import com.mirth.connect.server.controllers.ControllerFactory;
  */
 public final class OidcConfigLoader {
 
-    /** Key catalog with defaults; order is the UI/wire order. */
-    static final Map<String, String> DEFAULTS;
-    static {
-        Map<String, String> d = new LinkedHashMap<>();
-        d.put("enabled", "false");
-        d.put("discovery-url", "");
-        d.put("client-id", "");
-        d.put("username-claim", "preferred_username");
-        d.put("allowed-algorithms", "RS256,RS384,RS512,ES256,ES384,ES512");
-        d.put("clock-skew-seconds", "60");
-        d.put("max-token-age-seconds", "300");
-        d.put("jwks-cache-ttl-seconds", "300");
-        d.put("jit.enabled", "false");
-        d.put("jit.email-claim", "email");
-        d.put("jit.name-claim", "name");
-        d.put("jit.organization-claim", "organization");
-        d.put("username-prefix", "");
-        d.put("linked-accounts", "");
-        d.put("roles.claim", "groups");
-        d.put("roles.map", "");
-        d.put("roles.default", "");
-        d.put("roles.sync", "always");
-        d.put("roles.infer", "false");
-        DEFAULTS = java.util.Collections.unmodifiableMap(d);
-    }
+    /**
+     * The key catalog, from {@link PolicySchema}. Kept as a field because the
+     * name is used widely; the list itself lives in one place now, so this and
+     * {@link OidcConfig}'s per-key defaults can no longer drift apart the way
+     * jit.enabled once did.
+     */
+    static final Map<String, String> DEFAULTS = PolicySchema.defaults();
 
     private OidcConfigLoader() {}
 

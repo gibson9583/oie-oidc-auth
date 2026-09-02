@@ -106,17 +106,24 @@ class OidcConfigTest {
     }
 
     /**
-     * A policy missing both a client id and a valid number reports the client
-     * id: it is the more actionable of the two, and hoisting the numeric parses
-     * for the roles.default check must not have quietly reordered that.
+     * Shape before semantics: a policy with both a malformed value and a missing
+     * required one reports the malformed value first. Either is actionable now
+     * that type errors name their key — before the schema they did not, which is
+     * why this previously asserted the opposite order.
      */
     @Test
-    void reportsAMissingClientIdAheadOfAMalformedNumber() {
+    void reportsAMalformedValueAheadOfAMissingRequiredOne() {
         Properties p = enabled();
         p.remove("client-id");
         p.setProperty("clock-skew-seconds", "abc");
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(p));
-        assertTrue(e.getMessage().contains("client-id"), "expected the client-id message, got: " + e.getMessage());
+        assertTrue(e.getMessage().contains("clock-skew-seconds"), e.getMessage());
+
+        // With the types sound, the missing required key is what surfaces.
+        Properties typesOk = enabled();
+        typesOk.remove("client-id");
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(typesOk))
+                .getMessage().contains("client-id"));
     }
 
     @Test
@@ -148,11 +155,69 @@ class OidcConfigTest {
         assertEquals("sso:", OidcConfig.from(p).usernamePrefix());
     }
 
+    /**
+     * A malformed value names itself and its key. This used to surface as a bare
+     * NumberFormatException carrying only the offending text, which told an
+     * operator what was unparseable but not which of three numeric keys it came
+     * from.
+     */
     @Test
     void rejectsANonNumericWindow() {
         Properties p = enabled();
         p.setProperty("clock-skew-seconds", "soon");
-        assertThrows(NumberFormatException.class, () -> OidcConfig.from(p));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(p));
+        assertTrue(e.getMessage().contains("clock-skew-seconds"), e.getMessage());
+        assertTrue(e.getMessage().contains("soon"), e.getMessage());
+    }
+
+    /**
+     * Booleans are strict rather than falling back to false the way
+     * Boolean.parseBoolean does. "enabled=maybe" silently meaning "off" is the
+     * worst reading of a typo in the one key that decides whether SSO runs at
+     * all; "jit.enabled=Yes" silently meaning "off" is the second worst.
+     */
+    @Test
+    void rejectsAnUnrecognizedBoolean() {
+        Properties p = enabled();
+        p.setProperty("jit.enabled", "maybe");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(p));
+        assertTrue(e.getMessage().contains("jit.enabled"), e.getMessage());
+
+        // …but the spellings a hand-written or templated config plausibly
+        // produces are accepted rather than being a trap.
+        for (String yes : new String[] { "true", "TRUE", " yes ", "on", "1" }) {
+            Properties on = enabled();
+            on.setProperty("jit.enabled", yes);
+            assertTrue(OidcConfig.from(on).jitEnabled(), yes);
+        }
+        for (String no : new String[] { "false", "FALSE", "no", "off", "0" }) {
+            Properties off = enabled();
+            off.setProperty("jit.enabled", no);
+            assertFalse(OidcConfig.from(off).jitEnabled(), no);
+        }
+    }
+
+    /**
+     * roles.sync is the only enum-valued key, and before the schema existed it
+     * was the only constrained key with no validation at all: "Never" parsed
+     * happily and then meant "reconcile on every login" — the exact opposite of
+     * what the operator wrote, silently.
+     */
+    @Test
+    void rejectsAnUnrecognizedRolesSync() {
+        for (String bad : new String[] { "Never", "NEVER", "jit_only", "sometimes" }) {
+            Properties p = enabled();
+            p.setProperty("roles.sync", bad);
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(p), bad);
+            assertTrue(e.getMessage().contains("roles.sync"), e.getMessage());
+            assertTrue(e.getMessage().contains("always"), "the message must name the accepted values");
+        }
+        for (String good : new String[] { "always", "jit-only", "never" }) {
+            Properties p = enabled();
+            p.setProperty("roles.sync", good);
+            p.setProperty("roles.default", "Viewer");
+            assertEquals(good, OidcConfig.from(p).rolesSync());
+        }
     }
 
     @Test

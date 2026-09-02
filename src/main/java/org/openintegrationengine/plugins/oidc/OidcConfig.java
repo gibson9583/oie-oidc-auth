@@ -27,12 +27,19 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         String rolesSync, boolean rolesInfer) {
 
     static OidcConfig from(Properties p) {
-        boolean enabled = bool(p, "enabled", false);
-        String discoveryUrl = enabled ? required(p, "discovery-url") : p.getProperty("discovery-url", "");
+        // Type-check every key against the schema before reading any of them, so
+        // a malformed value is named as itself rather than surfacing later as
+        // whatever the first consumer makes of it. This is where roles.sync gets
+        // checked at all: it is the only enum-valued key, and before the schema
+        // existed nothing validated it — "Never" (capital N) parsed happily and
+        // then meant "reconcile on every login", the exact opposite of intent.
+        validateAgainstSchema(p);
+        boolean enabled = bool(p, "enabled");
+        String discoveryUrl = enabled ? required(p, "discovery-url") : value(p, "discovery-url");
         if (enabled) {
             requireHttps(discoveryUrl, "discovery-url");
         }
-        String usernamePrefix = p.getProperty("username-prefix", "");
+        String usernamePrefix = value(p, "username-prefix");
         // The prefix is concatenated in front of the normalized (lowercased)
         // username and the result must satisfy the username charset — reject a
         // prefix that would make every login fail.
@@ -43,15 +50,15 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         // client id and a valid number still reports the missing client id — the
         // more actionable of the two, and what this reported before the parses
         // were hoisted.
-        String clientId = enabled ? required(p, "client-id") : p.getProperty("client-id", "");
+        String clientId = enabled ? required(p, "client-id") : value(p, "client-id");
         // Parsed BEFORE the policy check below so a malformed number still reports
         // itself as one, rather than being masked by whatever validation happens
         // to run first.
-        long clockSkew = number(p, "clock-skew-seconds", 60);
-        long maxTokenAge = number(p, "max-token-age-seconds", 300);
-        long jwksTtl = number(p, "jwks-cache-ttl-seconds", 300);
-        String rolesSync = p.getProperty("roles.sync", "always");
-        String defaultRole = p.getProperty("roles.default", "").trim();
+        long clockSkew = number(p, "clock-skew-seconds");
+        long maxTokenAge = number(p, "max-token-age-seconds");
+        long jwksTtl = number(p, "jwks-cache-ttl-seconds");
+        String rolesSync = value(p, "roles.sync");
+        String defaultRole = value(p, "roles.default").trim();
         // With RBAC installed, a returning user whose claims resolve to no role
         // would keep whatever role they already had — so revoking their group at
         // the IdP would not remove their engine access. Rather than decide what
@@ -74,8 +81,8 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         return new OidcConfig(enabled,
                 discoveryUrl,
                 clientId,
-                p.getProperty("username-claim", "preferred_username"),
-                csv(p.getProperty("allowed-algorithms", "RS256,RS384,RS512,ES256,ES384,ES512")),
+                value(p, "username-claim"),
+                csv(value(p, "allowed-algorithms")),
                 clockSkew,
                 maxTokenAge,
                 jwksTtl,
@@ -84,17 +91,17 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
                 // or hand-written properties — silently turned JIT provisioning ON
                 // while the settings tab, which also defaults to "No", showed it
                 // off. Provisioning users is not a default to infer.
-                bool(p, "jit.enabled", false),
-                p.getProperty("jit.email-claim", "email"),
-                p.getProperty("jit.name-claim", "name"),
-                p.getProperty("jit.organization-claim", "organization"),
+                bool(p, "jit.enabled"),
+                value(p, "jit.email-claim"),
+                value(p, "jit.name-claim"),
+                value(p, "jit.organization-claim"),
                 usernamePrefix,
-                pairs(p.getProperty("linked-accounts", "")),
-                p.getProperty("roles.claim", "groups"),
-                pairs(p.getProperty("roles.map", "")),
+                pairs(value(p, "linked-accounts")),
+                value(p, "roles.claim"),
+                pairs(value(p, "roles.map")),
                 defaultRole,
                 rolesSync,
-                bool(p, "roles.infer", false));
+                bool(p, "roles.infer"));
     }
 
     /**
@@ -125,12 +132,50 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         return value.trim();
     }
 
-    private static boolean bool(Properties p, String key, boolean fallback) {
-        return Boolean.parseBoolean(p.getProperty(key, String.valueOf(fallback)));
+    /** The stored value, or the schema's default when the key is absent. */
+    private static String value(Properties p, String key) {
+        return p.getProperty(key, PolicySchema.of(key).fallback());
     }
 
-    private static long number(Properties p, String key, long fallback) {
-        return Long.parseLong(p.getProperty(key, String.valueOf(fallback)));
+    private static boolean bool(Properties p, String key) {
+        return PolicySchema.parseBoolean(key, value(p, key));
+    }
+
+    private static long number(Properties p, String key) {
+        return Long.parseLong(value(p, key));
+    }
+
+    /**
+     * Type-checks every present key. Numbers report themselves as numbers,
+     * booleans refuse a value they would otherwise silently read as false, and
+     * enums name the values they accept — so a typo says what is wrong with it
+     * rather than taking effect as some default.
+     */
+    private static void validateAgainstSchema(Properties p) {
+        for (PolicySchema.Key key : PolicySchema.KEYS) {
+            String raw = p.getProperty(key.name());
+            if (raw == null) {
+                continue;
+            }
+            switch (key.kind()) {
+                case BOOLEAN -> PolicySchema.parseBoolean(key.name(), raw);
+                case NUMBER -> {
+                    try {
+                        Long.parseLong(raw.trim());
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException(
+                                key.name() + " must be a whole number, but was \"" + raw + "\"");
+                    }
+                }
+                case ENUM -> {
+                    if (!key.choices().contains(raw.trim())) {
+                        throw new IllegalArgumentException(key.name() + " must be one of "
+                                + String.join(", ", key.choices()) + ", but was \"" + raw + "\"");
+                    }
+                }
+                default -> { /* TEXT, URL and PAIRS are checked where they are used */ }
+            }
+        }
     }
 
     private static Set<String> csv(String value) {
