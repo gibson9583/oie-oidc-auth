@@ -14,16 +14,13 @@ import java.util.Properties;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mirth.connect.server.controllers.ControllerFactory;
 
 /**
- * The policy's key catalog, defaults, operator overrides, and persistence
- * helper. Storage follows the engine's native plugin-properties contract:
- * the ENGINE owns reads — it seeds {@code getDefaultProperties()} and pushes
- * the stored policy into {@code init(Properties)}/{@code update(Properties)};
- * this plugin never reads the property store itself. Saves persist through
- * {@link com.mirth.connect.server.controllers.ExtensionController} and are
- * applied to the live plugin in the same step.
+ * The policy's key catalog, defaults, operator overrides, and the save
+ * entry point. The policy is stored in the extension's own configuration
+ * group ({@link PolicyStore}), read once at startup by the plugin and applied
+ * in memory; a save writes the store and applies in the same step, so the
+ * store is never read on a request thread.
  *
  * <p>Operator overrides: an {@code org.openintegrationengine.oidc.*} system
  * property or {@code OIE_OIDC_*} environment variable (env wins) overlays any
@@ -143,12 +140,6 @@ public final class OidcConfigLoader {
      * store is never read back.
      */
     static void saveAndApply(Properties properties) throws IOException {
-        try {
-            ControllerFactory.getFactory().createExtensionController()
-                    .setPluginProperties(OidcAdminServletInterface.PLUGIN_POINT, properties);
-        } catch (Exception e) {
-            throw new IOException("Could not save the OIDC policy to the engine database: " + e.getMessage(), e);
-        }
-        OidcAuthorizationPlugin.applyToInstance(properties);
+        OidcAuthorizationPlugin.saveAndApplyToInstance(properties);
     }
 }

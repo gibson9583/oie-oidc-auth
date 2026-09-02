@@ -73,7 +73,7 @@ The tab has these properties:
 
 ## Policy storage
 
-The policy lives in the engine database as the extension's plugin properties. The engine seeds the defaults at install, adds new keys at upgrade, and loads the stored policy at startup. A save stores and applies the policy in one step. There is no configuration file. `oidc.properties.example` lists the keys in properties form for reference only; the extension does not read it.
+The policy lives in the engine database, in a configuration group of the extension's own. It is not kept in the per-plugin properties slot, because the Extensions page dumps that slot raw and a server-configuration export carries it, with no idea which keys are secrets. So **Extensions → OIDC Authentication → Properties** shows nothing, by design, and the client secret exists nowhere but masked in the settings tab. A policy that an earlier build saved in the slot is moved into the group, and the slot emptied, the first time this build starts. The engine seeds the defaults at install, adds new keys at upgrade, and loads the stored policy at startup. A save stores and applies the policy in one step. There is no configuration file. `oidc.properties.example` lists the keys in properties form for reference only; the extension does not read it.
 
 ### Operator overrides
 

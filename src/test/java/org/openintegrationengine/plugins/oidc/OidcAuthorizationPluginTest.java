@@ -106,21 +106,112 @@ class OidcAuthorizationPluginTest {
         assertEquals(Status.FAIL, status.getStatus());
     }
 
+    /* ---- where the policy lives ------------------------------------------ */
+
+    /** An in-memory store, plus a record of what happened to the plugin slot. */
+    private static final class MemoryStore implements PolicyStore {
+        Properties saved = new Properties();
+        int slotCleared;
+        RuntimeException failure;
+
+        @Override
+        public Properties load() {
+            if (failure != null) {
+                throw failure;
+            }
+            Properties copy = new Properties();
+            copy.putAll(saved);
+            return copy;
+        }
+
+        @Override
+        public void save(Properties policy) {
+            saved = new Properties();
+            saved.putAll(policy);
+        }
+
+        @Override
+        public void clearPluginSlot() {
+            slotCleared++;
+        }
+    }
+
     @Test
-    void theEnginePushedPolicyIsAppliedAndServedBack() {
-        // The native contract: init/update hand the plugin its policy; the
-        // plugin serves it from memory and never reads the property store.
-        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
-        Properties stored = OidcConfigLoader.defaults();
-        stored.putAll(policy());
-        plugin.init(stored);
+    void nothingIsSeededIntoTheEnginesPluginSlot() {
+        // The slot is dumped raw by the Extensions page and carried by
+        // configuration exports; the policy must never be there.
+        assertEquals(true, new OidcAuthorizationPlugin().getDefaultProperties().isEmpty());
+    }
+
+    @Test
+    void thePolicyIsReadFromTheExtensionsOwnStoreAtStartup() {
+        MemoryStore store = new MemoryStore();
+        store.saved.putAll(policy());
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
+
+        plugin.init(new Properties());   // the engine's slot: empty, as it should be
 
         assertEquals("client", OidcAuthorizationPlugin.currentProperties().getProperty("client-id"));
         assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
+        assertEquals(0, store.slotCleared, "nothing in the slot, nothing to clear");
+    }
 
-        Properties disabled = OidcConfigLoader.defaults();
-        plugin.update(disabled);
+    @Test
+    void aPolicyLeftInThePluginSlotIsMovedOnceAndTheSlotEmptied() {
+        MemoryStore store = new MemoryStore();
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
+
+        plugin.init(policy());   // what a pre-1.0 build had saved into the slot
+
+        assertEquals("client", store.saved.getProperty("client-id"), "moved into the store");
+        assertEquals(1, store.slotCleared, "and out of the slot");
+        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
+    }
+
+    @Test
+    void aStaleSlotNeverOverridesTheStoreButIsStillEmptied() {
+        MemoryStore store = new MemoryStore();
+        store.saved.putAll(policy());
+        Properties stale = policy();
+        stale.setProperty("client-id", "stale-slot-copy");
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
+
+        plugin.init(stale);
+
+        assertEquals("client", OidcAuthorizationPlugin.currentProperties().getProperty("client-id"));
+        assertEquals("client", store.saved.getProperty("client-id"), "the store is authoritative");
+        assertEquals(1, store.slotCleared);
+    }
+
+    @Test
+    void aSaveWritesTheStoreAndAppliesWithoutReadingItBack() throws Exception {
+        MemoryStore store = new MemoryStore();
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
+        plugin.init(new Properties());
+
+        Properties saved = policy();
+        OidcConfigLoader.saveAndApply(saved);
+
+        assertEquals("client", store.saved.getProperty("client-id"));
+        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
+        // A write to the engine's slot — the generic endpoint, a config import —
+        // is not a policy change: the store is what counts.
+        Properties slotWrite = policy();
+        slotWrite.setProperty("enabled", "false");
+        plugin.update(slotWrite);
+        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
+    }
+
+    @Test
+    void anUnreadableStoreLoadsDisabledAndSaysWhy() {
+        MemoryStore store = new MemoryStore();
+        store.failure = new IllegalStateException("database away");
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
+
+        plugin.init(new Properties());   // must not throw into engine startup
+
         assertEquals(false, OidcAuthorizationPlugin.currentConfig().enabled());
+        assertEquals(true, String.valueOf(OidcAuthorizationPlugin.currentError()).contains("database away"));
     }
 
     /* ---- only a ticket is a credential --------------------------------- */

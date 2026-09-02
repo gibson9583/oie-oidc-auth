@@ -105,6 +105,13 @@ password sign-in gets.
   is capped at 2 KB so the sealed cookie stays deliverable; **Test connection**
   is audited (without its body); discovery refreshes no longer hold every
   concurrent sign-in behind one fetch.
+- The policy is stored in the extension's own configuration group, not the
+  engine's per-plugin properties slot. That slot is dumped raw by the
+  Extensions page's **Properties** action and carried by server-configuration
+  exports, with no notion of which keys are secrets — the client secret was
+  readable there in the clear. The slot now stays empty (a policy an earlier
+  build saved there is moved on first start), so the settings tab is the only
+  place the policy exists.
 - Web administrator: sign-out with auto-redirect on shows the sign-in card
   instead of bouncing straight back to the provider, and a crafted
   `/oidc/callback?error=` link no longer evicts a signed-in user.

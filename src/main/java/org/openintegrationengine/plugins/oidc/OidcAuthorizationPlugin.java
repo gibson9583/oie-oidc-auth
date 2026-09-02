@@ -6,6 +6,7 @@
 
 package org.openintegrationengine.plugins.oidc;
 
+import java.io.IOException;
 import java.util.Properties;
 import java.util.function.Supplier;
 
@@ -20,6 +21,7 @@ import com.mirth.connect.model.LoginStatus.Status;
 import com.mirth.connect.model.User;
 import com.mirth.connect.plugins.AuthorizationPlugin;
 import com.mirth.connect.plugins.ServicePlugin;
+import com.mirth.connect.server.controllers.ConfigurationController;
 import com.mirth.connect.server.controllers.UserController;
 import com.nimbusds.jwt.JWTClaimsSet;
 
@@ -41,6 +43,10 @@ import com.nimbusds.jwt.JWTClaimsSet;
  * bound to a provider subject, not listed in {@code linked-accounts}, while
  * SSO is active — in which case it is refused: that account signs in through
  * the provider only, so removing it there removes its access here.</p>
+ *
+ * <p>The policy is held in memory and read from the {@link PolicyStore} at
+ * startup only; a save writes the store and applies in the same step, so the
+ * store is never read on a request thread.</p>
  */
 public final class OidcAuthorizationPlugin implements AuthorizationPlugin, ServicePlugin {
 
@@ -54,6 +60,8 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     /** The live instance, so the admin servlet can apply a saved policy. */
     static volatile OidcAuthorizationPlugin instance;
 
+    private final Supplier<PolicyStore> storeSupplier;
+    private volatile PolicyStore store;
     private volatile Properties properties = new Properties();
     private volatile OidcConfig config;
     private volatile OidcTokenValidator validator;
@@ -67,19 +75,90 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     /** The engine's user directory; replaceable so tests need no running engine. */
     private volatile Supplier<UserController> users = UserController::getInstance;
 
+    public OidcAuthorizationPlugin() {
+        // Resolved on first use, not here: the engine constructs plugins before
+        // its controllers are necessarily ready.
+        this(() -> PolicyStore.Engine.of(ConfigurationController.getInstance()));
+    }
+
+    /** Test seam: a store that needs no engine. */
+    OidcAuthorizationPlugin(Supplier<PolicyStore> store) {
+        this.storeSupplier = store;
+    }
+
+    private PolicyStore store() {
+        PolicyStore current = store;
+        if (current == null) {
+            current = storeSupplier.get();
+            store = current;
+        }
+        return current;
+    }
+
     @Override
     public String getPluginPointName() {
         return PLUGIN_POINT;
     }
 
+    /**
+     * Nothing. The engine seeds whatever this returns into its per-plugin
+     * properties slot, and that slot is exposed raw — the Extensions page dumps
+     * it for any plugin, secrets included, and a server-configuration export
+     * carries it. The policy lives in the extension's own group instead
+     * ({@link PolicyStore}), so the slot stays empty and the settings tab is
+     * the only place the policy can be seen or changed.
+     */
     @Override
-    public void init(Properties stored) {
-        apply(stored);
+    public Properties getDefaultProperties() {
+        return new Properties();
     }
 
+    /**
+     * Startup. The engine hands over whatever its per-plugin slot holds; a
+     * policy saved by a build that kept it there is moved into the store once,
+     * and the slot is emptied either way so nothing stays visible raw.
+     */
     @Override
-    public void update(Properties stored) {
-        apply(stored);
+    public void init(Properties slot) {
+        Properties policy;
+        try {
+            policy = policyAtStartup(slot);
+        } catch (Exception e) {
+            // A store that cannot be read must not take the engine down with
+            // it. Load disabled, and say why in the place the tab reads.
+            log.warn("OIDC authentication could not read its stored policy; loading disabled: {}", e.toString());
+            apply(new Properties());
+            lastError = "the stored policy could not be read: " + e.getMessage();
+            return;
+        }
+        apply(policy);
+    }
+
+    private Properties policyAtStartup(Properties slot) {
+        Properties stored = store().load();
+        if (slot != null && !slot.isEmpty()) {
+            if (stored.isEmpty()) {
+                store().save(slot);
+                stored = slot;
+                log.info("OIDC policy moved out of the engine's plugin-properties slot into the extension's own configuration group.");
+            }
+            store().clearPluginSlot();
+        }
+        return stored;
+    }
+
+    /**
+     * The engine calls this when something writes its per-plugin slot: the
+     * generic properties endpoint, or a configuration import. The slot is not
+     * where the policy lives, so the store is re-read and the slot is ignored.
+     */
+    @Override
+    public void update(Properties slot) {
+        try {
+            apply(store().load());
+        } catch (Exception e) {
+            log.warn("OIDC authentication could not re-read its stored policy: {}", e.toString());
+        }
     }
 
     @Override
@@ -106,13 +185,6 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     }
 
     @Override
-    public Properties getDefaultProperties() {
-        // The engine seeds these into the property store on first install and
-        // merges newly added keys on upgrade — the native settings lifecycle.
-        return OidcConfigLoader.defaults();
-    }
-
-    @Override
     public ExtensionPermission[] getExtensionPermissions() {
         return new ExtensionPermission[] { new ExtensionPermission(PLUGIN_POINT,
                 OidcAdminServletInterface.PERMISSION_MANAGE,
@@ -123,9 +195,31 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     }
 
     /**
-     * The single configuration entry point, engine-pushed (init/update) or
-     * servlet-pushed (save). The plugin never reads the property store; the
-     * given properties — plus operator env/system pins — ARE the policy.
+     * Persists the policy and applies it in one step. The saved properties
+     * themselves become the active configuration; the store is never read back.
+     */
+    void persistAndApply(Properties policy) throws IOException {
+        try {
+            store().save(policy);
+        } catch (Exception e) {
+            throw new IOException("Could not save the OIDC policy to the engine database: " + e.getMessage(), e);
+        }
+        apply(policy);
+    }
+
+    /** The admin servlet's save, routed to the live instance. */
+    static void saveAndApplyToInstance(Properties policy) throws IOException {
+        OidcAuthorizationPlugin current = instance;
+        if (current == null) {
+            throw new IOException("The OIDC extension has not been initialized by the engine");
+        }
+        current.persistAndApply(policy);
+    }
+
+    /**
+     * The single configuration entry point: the stored policy at startup, or a
+     * just-saved one. The given properties — plus operator env/system pins —
+     * ARE the policy.
      */
     private void apply(Properties stored) {
         instance = this;
@@ -214,14 +308,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 || "true".equalsIgnoreCase(System.getenv("OIE_OIDC_DISABLED"));
     }
 
-    static void applyToInstance(Properties stored) {
-        OidcAuthorizationPlugin current = instance;
-        if (current != null) {
-            current.apply(stored);
-        }
-    }
-
-    /** Test seam: inject a policy without touching the filesystem. */
+    /** Test seam: inject a policy without touching the store. */
     void configure(OidcConfig config, OidcTokenValidator validator) {
         this.config = config;
         this.validator = validator;
