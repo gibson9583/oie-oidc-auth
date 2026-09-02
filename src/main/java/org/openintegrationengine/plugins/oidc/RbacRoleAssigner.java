@@ -85,32 +85,13 @@ public final class RbacRoleAssigner {
             }
             if (role == null || role.isBlank()) {
                 role = config.defaultRole();
-                // Say so, naming the claim that was read and what came back.
-                // Falling through to the default is the single most likely
-                // misconfiguration in this extension and the hardest to see: a
-                // roles.claim pointing at the wrong path — Keycloak puts realm
-                // roles at realm_access.roles, and its mappers default to the
-                // access token rather than the ID token — yields NO claim values
-                // and therefore the default role for every user who signs in. If
-                // that default is a privileged role, everyone becomes privileged,
-                // and nothing else in the system remarks on it.
-                //
-                // WARN only when a claim was EXPECTED to decide the role — a
-                // mapping is configured, or inference is on. With neither, the
-                // default IS the configured outcome for every user, and a warning
-                // per login would train operators to ignore the one that matters.
-                boolean claimExpected = !config.rolesMap().isEmpty() || config.rolesInfer();
-                if (!claimExpected) {
-                    log.debug("OIDC assigning the default role '{}' to user id {}: no roles.map entries and roles.infer is off",
-                            role, userId);
-                } else if (identity.roles().isEmpty()) {
-                    log.warn("OIDC found no values in the '{}' claim for user id {}; assigning the default role '{}'. "
-                            + "If that is unexpected, check the claim path and that the provider's mapper adds it to "
-                            + "the ID token (not only the access token).", config.rolesClaim(), userId, role);
-                } else {
-                    log.warn("OIDC matched none of the claim values {} to a role for user id {}; assigning the "
-                            + "default role '{}'.", identity.roles(), userId, role);
-                }
+                // Routine, so DEBUG: the operator asked for no per-login role
+                // chatter at the default level. The claim name and what it held
+                // are still here for anyone diagnosing "why does everyone get the
+                // default" — the README's roles-claim recipe is the usual answer
+                // (a mapper writing to the access token only).
+                log.debug("OIDC assigning the default role '{}' to user id {}: claim '{}' carried {}",
+                        role, userId, config.rolesClaim(), identity.roles());
             }
             if (role == null || role.isBlank()) {
                 return;
@@ -131,9 +112,9 @@ public final class RbacRoleAssigner {
                 return;
             }
             call(type, repo, "assignUserRole", new Class[] { int.class, int.class }, userId, target);
-            // Only fires on an actual CHANGE (an unchanged role returned above),
-            // so this is the audit line for "the IdP moved someone's access".
-            log.info("OIDC assigned RBAC role '{}' to user id {}", role, userId);
+            // Only fires on an actual CHANGE (an unchanged role returned above).
+            // DEBUG at the operator's request; RBAC's own assignment is the record.
+            log.debug("OIDC assigned RBAC role '{}' to user id {}", role, userId);
             // RBAC caches per-user authorization; a stale entry would keep the
             // OLD role's permissions live for this session.
             Object auth = ControllerFactory.getFactory().createAuthorizationController();
