@@ -73,6 +73,8 @@ password sign-in gets.
   signing keys that could verify a token, and changes nothing.
 - Fixed: choosing **Save** in the unsaved-changes prompt silently discarded the
   tab's changes while reporting success.
+- A save is audited as **Manage OIDC configuration** with the user and outcome
+  only; the policy body, client secret included, is excluded from the event.
 
 ## Known limitations
 

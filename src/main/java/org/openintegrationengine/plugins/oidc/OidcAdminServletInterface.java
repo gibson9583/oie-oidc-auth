@@ -17,6 +17,7 @@ import javax.ws.rs.core.MediaType;
 import com.mirth.connect.client.core.ClientException;
 import com.mirth.connect.client.core.api.BaseServletInterface;
 import com.mirth.connect.client.core.api.MirthOperation;
+import com.mirth.connect.client.core.api.Param;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -68,7 +69,11 @@ public interface OidcAdminServletInterface extends BaseServletInterface {
     @Path("/configuration")
     @Operation(summary = "Validates and saves the OIDC policy.")
     @MirthOperation(name = "setOidcConfiguration", display = "Manage OIDC configuration", permission = PERMISSION_MANAGE)
-    void configuration(String json) throws ClientException;
+    // The audit event records THAT the policy was managed, and by whom — not
+    // the policy itself. The body carries the client secret in the clear
+    // whenever it is being set, and the engine's audit log is far more widely
+    // readable than the policy.
+    void configuration(@Param(value = "configuration", excludeFromAudit = true) String json) throws ClientException;
 
     @POST
     @Path("/test")
