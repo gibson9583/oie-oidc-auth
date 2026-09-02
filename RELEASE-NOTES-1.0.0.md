@@ -12,26 +12,6 @@ Node deployment, which holds the client secret. The WAR has no server half and
 never offers SSO. Register one redirect URI at your provider:
 `<web-administrator-origin>/oidc/callback`.
 
-## Upgrading from 0.1.0
-
-Two changes alter behaviour on existing installations. Both fail closed, and
-both are quiet if you are not expecting them.
-
-**`jit.enabled` now defaults to off when the key is absent.** The parser
-previously defaulted it *on* while the loader seeded it off, so a stored policy
-missing the key silently provisioned users while the settings tab displayed the
-feature as disabled. If you relied on that — and the tab said "No" — you must
-now set it explicitly.
-
-**`roles.default` is required when OIDC is enabled and RBAC is installed**,
-unless `roles.sync=never`. A policy without it is rejected at load, and the
-symptom is easy to misread: the engine still starts, but SSO stops being
-advertised and the settings tab still shows *Enable OIDC login* ticked, because
-it serves the stored policy rather than the parsed one. The real reason is in
-the engine log. If an SSO-only deployment locks itself out this way, set
-`OIE_OIDC_ROLES_DEFAULT=<role>` — it applies before validation and needs neither
-the database nor the UI.
-
 ## Fixed
 
 - A profile refresh on re-login ran **before** the subject-binding checks, so
@@ -71,6 +51,11 @@ sign-in. See the README's *Limitations* section for what each means in practice.
 
 ## Verification
 
-83 unit tests. **Not yet exercised on a live engine** — install the zip on a
-clean OIE 4.6.0 and walk the settings tab and one SSO sign-in before relying on
-this build.
+96 unit tests, and this build walked end to end on OIE 4.6.0 with RBAC 1.1.2
+against Keycloak: the settings tab rendered from the schema, refused a save
+with no default role, verified discovery plus one reachable signing key on
+**Test connection**, persisted, and the engine logged the policy as ACTIVE;
+a first SSO sign-in JIT-provisioned the user with the IdP's email and name and
+assigned the default role, which the engine then enforced (`manageOIDC`, role
+management, and server settings all answered 403 to that user); a second sign-in
+found the same account by its binding rather than creating another.
