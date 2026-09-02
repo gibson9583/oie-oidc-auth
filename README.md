@@ -6,7 +6,7 @@ Engine-side authorization extension for the OIE web administrator's native OpenI
 
 ## Install and configure
 
-Build with Java 17 and an OIE 4.6.0 installation:
+Requires OIE 4.6.0 and the OIE web administrator 0.9.0 or newer. Build with Java 17 and an OIE 4.6.0 installation:
 
 ```sh
 OIE_HOME=/path/to/oie mvn clean package
