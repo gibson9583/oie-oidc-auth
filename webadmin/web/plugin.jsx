@@ -19,12 +19,14 @@ const choiceLabel=(key,value)=>(CHOICE_LABELS[key]&&CHOICE_LABELS[key][value])||
 // as a confidently unticked box.
 const truthy=(value)=>['true','yes','on','1'].includes(String(value==null?'':value).trim().toLowerCase());
 const parsePairs=(value)=>String(value||'').split(',').map(s=>s.trim()).filter(Boolean).map(item=>{const i=item.indexOf('=');return {id:++nextRowId,...(i>0?{k:item.slice(0,i).trim(),v:item.slice(i+1).trim()}:{k:item.trim(),v:''})};});
-const serializePairs=(rows)=>rows.filter(r=>r.k.trim()&&r.v.trim()).map(r=>`${r.k.trim()}=${r.v.trim()}`).join(',');
+// `isBlank` lets an editor treat a value it seeded itself — the `issuer#` prefix
+// of a linked account — as empty, so a fresh row reads as untouched.
+const serializePairs=(rows,isBlank=(v)=>!String(v||'').trim())=>rows.filter(r=>r.k.trim()&&!isBlank(r.v)).map(r=>`${r.k.trim()}=${r.v.trim()}`).join(',');
 // What serializePairs would silently discard, said out loud. A half-filled row
 // never reaches the PUT but stays on screen, so without this the operator gets a
 // success toast, a phantom mapping, and a tab that no longer matches the engine.
-const pairProblem=(rows)=>{
- if(rows.some(r=>!!r.k.trim()!==!!r.v.trim()))return 'Every row needs both a key and a value — fill the blank one in, or remove the row.';
+const pairProblem=(rows,isBlank=(v)=>!String(v||'').trim())=>{
+ if(rows.some(r=>!!r.k.trim()!==!isBlank(r.v)))return 'Every row needs both a key and a value — fill the blank one in, or remove the row.';
  const keys=rows.map(r=>r.k.trim()).filter(Boolean);
  const duplicate=keys.find((k,i)=>keys.indexOf(k)!==i);
  return duplicate?`"${duplicate}" appears more than once — only the last would take effect.`:null;
@@ -33,46 +35,65 @@ const pairProblem=(rows)=>{
 // role typed before RBAC listed it, or renamed since, stays visible and selected
 // — marked — instead of snapping to the first option and quietly rewriting the
 // policy on the next save.
-function ChoiceSelect({value,options,placeholder,disabled,onChange,style}){
+function ChoiceSelect({value,options,placeholder,unknownLabel,disabled,onChange,style}){
  const current=String(value||'');
  return <select style={style} value={current} disabled={disabled} onChange={e=>onChange(e.target.value)}>
   <option value="">{placeholder||'— choose —'}</option>
   {options.map(o=><option key={o} value={o}>{o}</option>)}
-  {current&&!options.includes(current)?<option value={current}>{current} (not an existing role)</option>:null}
+  {current&&!options.includes(current)?<option value={current}>{current} {unknownLabel||'(unknown)'}</option>:null}
  </select>}
-// The RBAC role list in whichever shape the engine's serializer hands over: the
-// XStream root key may or may not have been unwrapped, and a one-role list
-// arrives as a bare object rather than an array.
-const roleNamesOf=(raw)=>{
+// An engine list in whichever shape the serializer hands over: the XStream root
+// key may or may not have been unwrapped, and a one-item list arrives as a bare
+// object rather than an array.
+const listOf=(raw,key)=>{
  const inner=raw&&typeof raw==='object'&&!Array.isArray(raw)&&raw.list?raw.list:raw;
- const roles=inner&&typeof inner==='object'&&!Array.isArray(inner)&&inner['com.diridium.rbac.Role']!==undefined?inner['com.diridium.rbac.Role']:inner;
- const list=Array.isArray(roles)?roles:roles&&typeof roles==='object'?[roles]:[];
- return list.map(r=>r&&r.name).filter(Boolean);};
-function PairEditor({label,value,onChange,onProblem,disabled,keyPlaceholder,valuePlaceholder,valueOptions,addLabel}){
+ const items=inner&&typeof inner==='object'&&!Array.isArray(inner)&&inner[key]!==undefined?inner[key]:inner;
+ return Array.isArray(items)?items:items&&typeof items==='object'?[items]:[];};
+const roleNamesOf=(raw)=>listOf(raw,'com.diridium.rbac.Role').map(r=>r&&r.name).filter(Boolean);
+const userNamesOf=(raw)=>listOf(raw,'user').map(u=>u&&u.username).filter(Boolean);
+// Native suggestions, not a closed list: a claim is whatever the provider's
+// administrator named it, and nested paths are routine, so the field stays free
+// text — but typing shows the usual candidates. The roles claim is the one most
+// often wrong (it is why the engine warns when it finds no values), so its list
+// carries the exact provider paths, with this policy's client ID filled in.
+const SUGGESTIONS=(form)=>({
+ 'username-claim':['preferred_username','email','upn','unique_name','sub'],
+ 'jit.email-claim':['email','upn','mail'],
+ 'jit.name-claim':['name','given_name','family_name','display_name'],
+ 'jit.organization-claim':['organization','org','company'],
+ 'roles.claim':['groups','roles','realm_access.roles',`resource_access.${String(form['client-id']||'').trim()||'<client-id>'}.roles`]});
+// Rarely changed once set, and never the reason SSO is not working; folded
+// away so the tab leads with what decides identity and access.
+const ADVANCED=new Set(['jit.email-claim','jit.name-claim','jit.organization-claim','allowed-algorithms','clock-skew-seconds','max-token-age-seconds','jwks-cache-ttl-seconds']);
+function PairEditor({label,value,onChange,onProblem,disabled,keyPlaceholder,keyOptions,keyUnknownLabel,valuePlaceholder,valueOptions,valueUnknownLabel,valuePrefix,valueCheck,addLabel}){
  const [rows,setRows]=React.useState(()=>parsePairs(value));
  const last=React.useRef(value);
  // Refresh/load replaced the form value externally — rebuild the rows.
  React.useEffect(()=>{if(value!==last.current){last.current=value;setRows(parsePairs(value));}},[value]);
+ // A value that is only the prefix this editor seeded is as good as empty.
+ const isBlank=(v)=>{const t=String(v||'').trim();return !t||(!!valuePrefix&&t===valuePrefix);};
  // Only while editable. A problem inherited from stored data — a hand-written
  // policy, or an OIE_OIDC_* pin — would otherwise block Save with rows the
  // operator cannot touch, since every input is disabled until OIDC is enabled.
- const problem=disabled?null:pairProblem(rows);
+ const problem=disabled?null:(rows.filter(r=>r.k.trim()).map(r=>valueCheck?valueCheck(r.v):null).find(Boolean)||pairProblem(rows,isBlank));
  React.useEffect(()=>{onProblem(problem);return()=>onProblem(null);},[problem,onProblem]);
- const commit=(next)=>{setRows(next);const s=serializePairs(next);if(s!==last.current){last.current=s;onChange(s);}};
+ const commit=(next)=>{setRows(next);const s=serializePairs(next,isBlank);if(s!==last.current){last.current=s;onChange(s);}};
  // ',' separates entries so neither side may carry one; '=' separates the pair,
  // so only the KEY has to avoid it.
  const edit=(id,part,text)=>commit(rows.map(r=>r.id===id?{...r,[part]:part==='k'?text.replace(/[,=]/g,''):text.replace(/,/g,'')}:r));
  return <div className="field">
   <label>{label}</label>
   {rows.map((row)=><div key={row.id} style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
-   <input style={{flex:1}} type="text" value={row.k} placeholder={keyPlaceholder} disabled={disabled} onChange={e=>edit(row.id,'k',e.target.value)}/>
+   {Array.isArray(keyOptions)
+    ? <ChoiceSelect style={{flex:1}} value={row.k} options={keyOptions} placeholder={keyPlaceholder} unknownLabel={keyUnknownLabel} disabled={disabled} onChange={v=>edit(row.id,'k',v)}/>
+    : <input style={{flex:1}} type="text" value={row.k} placeholder={keyPlaceholder} disabled={disabled} onChange={e=>edit(row.id,'k',e.target.value)}/>}
    <span className="text-text-faint">→</span>
    {Array.isArray(valueOptions)
-    ? <ChoiceSelect style={{flex:1}} value={row.v} options={valueOptions} placeholder={valuePlaceholder} disabled={disabled} onChange={v=>edit(row.id,'v',v)}/>
+    ? <ChoiceSelect style={{flex:1}} value={row.v} options={valueOptions} placeholder={valuePlaceholder} unknownLabel={valueUnknownLabel} disabled={disabled} onChange={v=>edit(row.id,'v',v)}/>
     : <input style={{flex:1}} type="text" value={row.v} placeholder={valuePlaceholder} disabled={disabled} onChange={e=>edit(row.id,'v',e.target.value)}/>}
    <button className="btn" type="button" disabled={disabled} title="Remove" onClick={()=>commit(rows.filter(r=>r.id!==row.id))}>×</button>
   </div>)}
-  <button className="btn" type="button" disabled={disabled} onClick={()=>{setRows([...rows,{id:++nextRowId,k:'',v:''}]);}}>{addLabel}</button>
+  <button className="btn" type="button" disabled={disabled} onClick={()=>{setRows([...rows,{id:++nextRowId,k:'',v:valuePrefix||''}]);}}>{addLabel}</button>
   {problem?<div style={{color:'var(--err)',fontSize:12,marginTop:4}}>{problem}</div>:null}
  </div>}
 // The servlet exchanges JSON TEXT in String parameters/returns, which the
@@ -125,6 +146,14 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  // leaving role unchanged" — a list removes the typo.
  const [roleNames,setRoleNames]=React.useState(null);
  React.useEffect(()=>{let alive=true;(async()=>{try{const names=roleNamesOf(await api.get('/extensions/rbac/roles'));if(alive&&names.length)setRoleNames(names);}catch(e){/* free text */}})();return()=>{alive=false;};},[]);
+ // Likewise the engine's users, for the left side of a linked account.
+ const [userNames,setUserNames]=React.useState(null);
+ React.useEffect(()=>{let alive=true;(async()=>{try{const names=userNamesOf(await api.get('/users'));if(alive&&names.length)setUserNames(names);}catch(e){/* free text */}})();return()=>{alive=false;};},[]);
+ // The issuer, for the right side: a subject only means something with its
+ // issuer in front, and the operator should not have to know the convention.
+ // Test connection reports the authoritative value; until it has run, the
+ // discovery URL minus its well-known suffix is what every provider uses.
+ const [issuer,setIssuer]=React.useState('');
  // Fetch exactly once per mount; the Refresh task re-runs it on demand.
  // eslint-disable-next-line react-hooks/exhaustive-deps
  React.useEffect(()=>{load();},[]);
@@ -133,7 +162,7 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  React.useEffect(()=>{setTasks('OIDC Authentication Tasks',[
   taskButton('Save','save',()=>saveRef.current(),{primary:true,task:'doSave',group:'settings_OIDC Authentication'}),
   taskButton('Refresh','refresh',load),
-  taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));toast(`OIDC verified: ${r.issuer||'issuer'} — ${r.keyCount||0} signing key(s) reachable`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
+  taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));if(r.issuer)setIssuer(String(r.issuer));toast(`OIDC verified: ${r.issuer||'issuer'} — ${r.keyCount||0} signing key(s) reachable`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
  ]);},[load,setTasks]);
  // The host stores what it is given and CALLS it when the operator picks
  // "Save" in the unsaved-changes prompt (settings.tsx: saveRef.current()). This
@@ -175,25 +204,38 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
   <label className="check"><input type="checkbox" checked={truthy(form.enabled)} disabled={locked(f.key)}
    onChange={e=>patch('enabled',String(e.target.checked))}/>{f.label}{pinnedNote(f.key)}</label>
  </div>)}
- <div className="grid grid-cols-2 gap-4">{schema.filter(f=>f.key!=='enabled'&&f.kind!=='pairs').map(f=>
-  <div className="field" key={f.key}><label>{f.label}{pinnedNote(f.key)}</label>
+ {(()=>{
+  const suggest=SUGGESTIONS(form);
+  const renderField=(f)=><div className="field" key={f.key}><label>{f.label}{pinnedNote(f.key)}</label>
    {f.kind==='boolean'||f.kind==='enum'
     ? <select value={form[f.key]||''} disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}>
        {(f.kind==='boolean'?['true','false']:f.choices||[]).map(c=><option key={c} value={c}>{choiceLabel(f.key,c)}</option>)}
       </select>
     : f.key==='roles.default'&&roleNames
-     ? <ChoiceSelect value={form[f.key]||''} options={roleNames} placeholder="— no default role —" disabled={locked(f.key)} onChange={v=>patch(f.key,v)}/>
-     : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''}
+     ? <ChoiceSelect value={form[f.key]||''} options={roleNames} placeholder="— no default role —" unknownLabel="(not an existing role)" disabled={locked(f.key)} onChange={v=>patch(f.key,v)}/>
+     : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''} list={suggest[f.key]?`oidc-suggest-${f.key}`:undefined}
        disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}/>}
-  </div>)}</div>
- <div className="mt-4" style={{maxWidth:560}}>{schema.filter(f=>f.kind==='pairs').map(f=>
-  <PairEditor key={f.key} label={f.label+(pinned.includes(f.key)?' — pinned':'')} value={form[f.key]||''}
-   disabled={locked(f.key)} addLabel={f.key==='roles.map'?'Add mapping':'Link account'}
-   keyPlaceholder={f.key==='roles.map'?'claim value (e.g. oie-admins)':'engine username'}
-   valuePlaceholder={f.key==='roles.map'?(roleNames?'— choose a role —':'RBAC role (e.g. Administrator)'):'issuer#subject'}
-   valueOptions={f.key==='roles.map'?roleNames:undefined}
-   onChange={v=>patch(f.key,v)} onProblem={noteProblem(f.key)}/>)}
- </div>
+   {suggest[f.key]?<datalist id={`oidc-suggest-${f.key}`}>{suggest[f.key].map(s=><option key={s} value={s}/>)}</datalist>:null}
+  </div>;
+  const issuerGuess=issuer||String(form['discovery-url']||'').trim().replace(/\/\.well-known\/openid-configuration\/?$/,'');
+  const subjectCheck=(v)=>/#\s*$/.test(String(v||''))?'Paste the subject after "#" — the identifier your provider shows for this user (in Keycloak, the user\'s ID).':null;
+  return <>
+   <div className="grid grid-cols-2 gap-4">{schema.filter(f=>f.key!=='enabled'&&f.kind!=='pairs'&&!ADVANCED.has(f.key)).map(renderField)}</div>
+   <div className="mt-4" style={{maxWidth:560}}>{schema.filter(f=>f.kind==='pairs').map(f=>
+    <PairEditor key={f.key} label={f.label+(pinned.includes(f.key)?' — pinned':'')} value={form[f.key]||''}
+     disabled={locked(f.key)} addLabel={f.key==='roles.map'?'Add mapping':'Link account'}
+     keyPlaceholder={f.key==='roles.map'?'claim value (e.g. oie-admins)':(userNames?'— choose a user —':'engine username')}
+     keyOptions={f.key==='linked-accounts'?userNames:undefined} keyUnknownLabel="(no such user)"
+     valuePlaceholder={f.key==='roles.map'?(roleNames?'— choose a role —':'RBAC role (e.g. Administrator)'):'issuer#subject'}
+     valueOptions={f.key==='roles.map'?roleNames:undefined} valueUnknownLabel="(not an existing role)"
+     valuePrefix={f.key==='linked-accounts'&&issuerGuess?`${issuerGuess}#`:''}
+     valueCheck={f.key==='linked-accounts'?subjectCheck:undefined}
+     onChange={v=>patch(f.key,v)} onProblem={noteProblem(f.key)}/>)}
+   </div>
+   <details className="mt-4"><summary style={{cursor:'pointer',fontWeight:600}}>Advanced</summary>
+    <div className="grid grid-cols-2 gap-4 mt-2">{schema.filter(f=>ADVANCED.has(f.key)).map(renderField)}</div>
+   </details>
+  </>;})()}
  </div>}
 export async function register(host){
  // Ask the endpoint this panel actually needs, rather than reading RBAC's
