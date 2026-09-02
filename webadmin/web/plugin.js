@@ -19,12 +19,19 @@ var fields = [
   ["roles.claim", "Roles claim", "text"],
   ["roles.default", "Default role", "text"]
 ];
+var nextRowId = 0;
 var parsePairs = (value) => String(value || "").split(",").map((s) => s.trim()).filter(Boolean).map((item) => {
   const i = item.indexOf("=");
-  return i > 0 ? { k: item.slice(0, i).trim(), v: item.slice(i + 1).trim() } : { k: item.trim(), v: "" };
+  return { id: ++nextRowId, ...i > 0 ? { k: item.slice(0, i).trim(), v: item.slice(i + 1).trim() } : { k: item.trim(), v: "" } };
 });
 var serializePairs = (rows) => rows.filter((r) => r.k.trim() && r.v.trim()).map((r) => `${r.k.trim()}=${r.v.trim()}`).join(",");
-function PairEditor({ label, value, onChange, disabled, keyPlaceholder, valuePlaceholder, addLabel }) {
+var pairProblem = (rows) => {
+  if (rows.some((r) => !!r.k.trim() !== !!r.v.trim())) return "Every row needs both a key and a value \u2014 fill the blank one in, or remove the row.";
+  const keys = rows.map((r) => r.k.trim()).filter(Boolean);
+  const duplicate = keys.find((k, i) => keys.indexOf(k) !== i);
+  return duplicate ? `"${duplicate}" appears more than once \u2014 only the last would take effect.` : null;
+};
+function PairEditor({ label, value, onChange, onProblem, disabled, keyPlaceholder, valuePlaceholder, addLabel }) {
   const [rows, setRows] = React.useState(() => parsePairs(value));
   const last = React.useRef(value);
   React.useEffect(() => {
@@ -33,6 +40,11 @@ function PairEditor({ label, value, onChange, disabled, keyPlaceholder, valuePla
       setRows(parsePairs(value));
     }
   }, [value]);
+  const problem = disabled ? null : pairProblem(rows);
+  React.useEffect(() => {
+    onProblem(problem);
+    return () => onProblem(null);
+  }, [problem, onProblem]);
   const commit = (next) => {
     setRows(next);
     const s = serializePairs(next);
@@ -41,10 +53,10 @@ function PairEditor({ label, value, onChange, disabled, keyPlaceholder, valuePla
       onChange(s);
     }
   };
-  const edit = (i, part, text) => commit(rows.map((r, at) => at === i ? { ...r, [part]: text.replace(/[,=]/g, "") } : r));
-  return /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, label), rows.map((row, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.k, placeholder: keyPlaceholder, disabled, onChange: (e) => edit(i, "k", e.target.value) }), /* @__PURE__ */ React.createElement("span", { className: "text-text-faint" }, "\u2192"), /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.v, placeholder: valuePlaceholder, disabled, onChange: (e) => edit(i, "v", e.target.value) }), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, title: "Remove", onClick: () => commit(rows.filter((_, at) => at !== i)) }, "\xD7"))), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, onClick: () => {
-    setRows([...rows, { k: "", v: "" }]);
-  } }, addLabel));
+  const edit = (id, part, text) => commit(rows.map((r) => r.id === id ? { ...r, [part]: part === "k" ? text.replace(/[,=]/g, "") : text.replace(/,/g, "") } : r));
+  return /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, label), rows.map((row) => /* @__PURE__ */ React.createElement("div", { key: row.id, style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.k, placeholder: keyPlaceholder, disabled, onChange: (e) => edit(row.id, "k", e.target.value) }), /* @__PURE__ */ React.createElement("span", { className: "text-text-faint" }, "\u2192"), /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.v, placeholder: valuePlaceholder, disabled, onChange: (e) => edit(row.id, "v", e.target.value) }), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, title: "Remove", onClick: () => commit(rows.filter((r) => r.id !== row.id)) }, "\xD7"))), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, onClick: () => {
+    setRows([...rows, { id: ++nextRowId, k: "", v: "" }]);
+  } }, addLabel), problem ? /* @__PURE__ */ React.createElement("div", { style: { color: "var(--err)", fontSize: 12, marginTop: 4 } }, problem) : null);
 }
 var decode = (value) => {
   if (typeof value === "string") return value ? JSON.parse(value) : {};
@@ -63,7 +75,20 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
       setError(e.message || "Failed to load OIDC configuration.");
     }
   }, [markClean]);
+  const [pairProblems, setPairProblems] = React.useState({});
+  const problemHandlers = React.useRef({});
+  const noteProblem = React.useCallback((which) => {
+    if (!problemHandlers.current[which]) problemHandlers.current[which] = (problem) => setPairProblems((p) => p[which] === problem ? p : { ...p, [which]: problem });
+    return problemHandlers.current[which];
+  }, []);
+  const problemsRef = React.useRef(pairProblems);
+  problemsRef.current = pairProblems;
   const save = React.useCallback(async () => {
+    const blocking = Object.values(problemsRef.current).filter(Boolean);
+    if (blocking.length) {
+      toast(blocking[0], "error");
+      return false;
+    }
     try {
       await api.put(`${EXT}/configuration`, { string: JSON.stringify(form) });
       setForm(decode(await api.get(`${EXT}/configuration`)));
@@ -110,7 +135,8 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
       keyPlaceholder: "claim value (e.g. oie-admins)",
       valuePlaceholder: "RBAC role (e.g. Administrator)",
       addLabel: "Add mapping",
-      onChange: (v) => patch("roles.map", v)
+      onChange: (v) => patch("roles.map", v),
+      onProblem: noteProblem("roles.map")
     }
   ), /* @__PURE__ */ React.createElement(
     PairEditor,
@@ -121,21 +147,20 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
       keyPlaceholder: "engine username",
       valuePlaceholder: "issuer#subject",
       addLabel: "Link account",
-      onChange: (v) => patch("linked-accounts", v)
+      onChange: (v) => patch("linked-accounts", v),
+      onProblem: noteProblem("linked-accounts")
     }
   )));
 }
 async function register(host) {
   try {
-    let raw = await api.get("/extensions/rbac/my-permissions");
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) raw = raw.string;
-    const permissions = new Set((raw == null || raw === "" ? [] : Array.isArray(raw) ? raw : [raw]).map(String));
-    if (!permissions.has("manageOIDC")) return;
+    await api.get(`${EXT}/configuration`);
   } catch (e) {
-    if (!(e && (e.status === 404 || e.status === 501))) {
-      console.warn("[oidcauth] permission load failed \u2014 hiding settings panel:", e);
+    if (e && e.status === 403) {
+      console.warn("[oidcauth] manageOIDC not granted \u2014 hiding settings panel");
       return;
     }
+    console.warn("[oidcauth] permission probe inconclusive \u2014 showing settings panel:", e);
   }
   host.registerSettingsPanel({ label: "OIDC Authentication", order: 80, component: OidcPanel });
 }

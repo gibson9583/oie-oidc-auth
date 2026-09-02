@@ -22,6 +22,9 @@ class OidcConfigTest {
         p.setProperty("enabled", "true");
         p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
+        // Mandatory whenever RBAC is on the classpath, which it is here. See
+        // requiresADefaultRoleWhenRbacIsInstalled below for why.
+        p.setProperty("roles.default", "Viewer");
         return p;
     }
 
@@ -30,10 +33,90 @@ class OidcConfigTest {
         Properties p = enabled();
         p.setProperty("roles.map", "admins=Administrator,users=User");
         OidcConfig c = OidcConfig.from(p);
-        assertTrue(c.jitEnabled());
         assertEquals("Administrator", c.rolesMap().get("admins"));
         assertTrue(c.allowedAlgorithms().contains("RS256"));
         assertEquals(300, c.maxTokenAgeSeconds());
+    }
+
+    /**
+     * Absent means OFF, matching what OidcConfigLoader seeds. The parser used to
+     * default it TRUE, so a stored policy without the key — an upgrade, or
+     * hand-written properties — silently provisioned users while the settings
+     * tab, which also defaults to "No", showed the feature disabled.
+     */
+    @Test
+    void jitProvisioningIsOffWhenTheKeyIsAbsent() {
+        assertFalse(OidcConfig.from(enabled()).jitEnabled());
+
+        Properties on = enabled();
+        on.setProperty("jit.enabled", "true");
+        assertTrue(OidcConfig.from(on).jitEnabled());
+    }
+
+    /**
+     * With RBAC installed, claims that resolve to no role would leave the user's
+     * existing role in place — so revoking their IdP group would not remove
+     * their engine access. Requiring a default makes that state unreachable
+     * instead of handling it. RBAC is on this module's test classpath, so the
+     * constraint is live here.
+     */
+    @Test
+    void requiresADefaultRoleWhenRbacIsInstalled() {
+        assertTrue(RbacRoleAssigner.isInstalled(), "this test asserts the RBAC-present branch");
+
+        Properties p = enabled();
+        p.remove("roles.default");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(p));
+        assertTrue(e.getMessage().contains("roles.default"), "the error must name the key to set");
+
+        // A blank value is the same omission with extra steps.
+        Properties blank = enabled();
+        blank.setProperty("roles.default", "   ");
+        assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(blank));
+
+        // Disabled configurations stay lenient — nothing is being authorized.
+        Properties off = enabled();
+        off.setProperty("enabled", "false");
+        off.remove("roles.default");
+        assertFalse(OidcConfig.from(off).enabled());
+
+        // roles.sync=never returns before the assigner ever reads a default, so
+        // no stale role can be kept and demanding an unread value would break a
+        // deliberate hand-managed setup.
+        Properties unmanaged = enabled();
+        unmanaged.setProperty("roles.sync", "never");
+        unmanaged.remove("roles.default");
+        assertEquals("never", OidcConfig.from(unmanaged).rolesSync());
+    }
+
+    /**
+     * The value is trimmed, so a stray space cannot pass validation and then
+     * fail to match any role at login — which would silently restore the very
+     * stale-role behaviour the requirement exists to prevent.
+     */
+    @Test
+    void trimsTheDefaultRole() {
+        Properties p = enabled();
+        p.setProperty("roles.default", "  Viewer  ");
+        assertEquals("Viewer", OidcConfig.from(p).defaultRole());
+
+        Properties whitespaceOnly = enabled();
+        whitespaceOnly.setProperty("roles.default", "   ");
+        assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(whitespaceOnly));
+    }
+
+    /**
+     * A policy missing both a client id and a valid number reports the client
+     * id: it is the more actionable of the two, and hoisting the numeric parses
+     * for the roles.default check must not have quietly reordered that.
+     */
+    @Test
+    void reportsAMissingClientIdAheadOfAMalformedNumber() {
+        Properties p = enabled();
+        p.remove("client-id");
+        p.setProperty("clock-skew-seconds", "abc");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(p));
+        assertTrue(e.getMessage().contains("client-id"), "expected the client-id message, got: " + e.getMessage());
     }
 
     @Test

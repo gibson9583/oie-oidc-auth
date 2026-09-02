@@ -23,6 +23,29 @@ public final class RbacRoleAssigner {
 
     private static final Logger log = LogManager.getLogger(RbacRoleAssigner.class);
 
+    static final String RBAC_REPOSITORY = "com.diridium.rbac.RbacRepository";
+
+    /**
+     * Whether the RBAC extension is on the classpath. Presence only — it says
+     * nothing about whether RBAC has finished starting, which is why role sync
+     * itself stays best-effort. Used by {@link OidcConfig} to decide whether
+     * {@code roles.default} is mandatory: without RBAC there are no roles to
+     * assign, so requiring one would reject a perfectly valid configuration.
+     */
+    public static boolean isInstalled() {
+        try {
+            // initialize=false: presence is the question, and running RBAC's
+            // static initializers to answer it would let an ExceptionInInitializer
+            // Error escape a plain ClassNotFoundException catch — out through
+            // OidcConfig.from and the plugin's apply(), which catches Exception,
+            // and into engine startup. Throwable for the same reason.
+            Class.forName(RBAC_REPOSITORY, false, RbacRoleAssigner.class.getClassLoader());
+            return true;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
     public void assign(int userId, boolean created, ClaimsMapper.Identity identity, OidcConfig config) {
         if ("never".equals(config.rolesSync()) || ("jit-only".equals(config.rolesSync()) && !created)) {
             return;
@@ -45,7 +68,7 @@ public final class RbacRoleAssigner {
             return;
         }
         try {
-            Class<?> type = Class.forName("com.diridium.rbac.RbacRepository");
+            Class<?> type = Class.forName(RBAC_REPOSITORY);
             Object repo = type.getMethod("getInstance").invoke(null);
             // Opt-in inference: with no explicit mapping matched, a claim value
             // that IS an existing role name (exact match, claim order) wins.

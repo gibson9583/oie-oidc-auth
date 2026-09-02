@@ -40,6 +40,7 @@ class OidcAuthorizationPluginTest {
     private static OidcAuthorizationPlugin configured() throws Exception {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
+        p.setProperty("roles.default", "Viewer");   // required whenever RBAC is on the classpath
         p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
         OidcConfig config = OidcConfig.from(p);
@@ -87,6 +88,7 @@ class OidcAuthorizationPluginTest {
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         Properties stored = OidcConfigLoader.defaults();
         stored.setProperty("enabled", "true");
+        stored.setProperty("roles.default", "Viewer");
         stored.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         stored.setProperty("client-id", "client");
         plugin.init(stored);

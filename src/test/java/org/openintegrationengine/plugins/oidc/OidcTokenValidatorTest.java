@@ -82,6 +82,7 @@ class OidcTokenValidatorTest {
     private static OidcTokenValidator validator() {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
+        p.setProperty("roles.default", "Viewer");   // required whenever RBAC is on the classpath
         p.setProperty("discovery-url", base + "/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
         return new OidcTokenValidator(OidcConfig.from(p), new DiscoveryClient());

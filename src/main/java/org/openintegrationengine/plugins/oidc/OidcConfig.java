@@ -39,15 +39,52 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         if (!usernamePrefix.matches("[a-z0-9._@+:-]*")) {
             throw new IllegalArgumentException("username-prefix may only contain a-z 0-9 . _ @ + : -");
         }
+        // Resolved before the numeric parses below, so a policy missing BOTH a
+        // client id and a valid number still reports the missing client id — the
+        // more actionable of the two, and what this reported before the parses
+        // were hoisted.
+        String clientId = enabled ? required(p, "client-id") : p.getProperty("client-id", "");
+        // Parsed BEFORE the policy check below so a malformed number still reports
+        // itself as one, rather than being masked by whatever validation happens
+        // to run first.
+        long clockSkew = number(p, "clock-skew-seconds", 60);
+        long maxTokenAge = number(p, "max-token-age-seconds", 300);
+        long jwksTtl = number(p, "jwks-cache-ttl-seconds", 300);
+        String rolesSync = p.getProperty("roles.sync", "always");
+        String defaultRole = p.getProperty("roles.default", "").trim();
+        // With RBAC installed, a returning user whose claims resolve to no role
+        // would keep whatever role they already had — so revoking their group at
+        // the IdP would not remove their engine access. Rather than decide what
+        // to do in that case, make it unreachable: require a default, so claims
+        // always resolve to something.
+        //
+        // Narrowly scoped, because a rejection here takes SSO down (see the
+        // plugin's apply()). Not without RBAC — there are no roles to assign, so
+        // the key would be meaningless. Not with roles.sync=never — the assigner
+        // returns before ever reading a default, so no stale role can be kept by
+        // this extension, and demanding a value it will not read would break a
+        // deliberate hand-managed setup for nothing.
+        if (enabled && !"never".equals(rolesSync) && RbacRoleAssigner.isInstalled() && defaultRole.isEmpty()) {
+            throw new IllegalArgumentException("roles.default is required when OIDC is enabled and the "
+                    + "role-based-access-control extension is installed. Set it to the role a user should hold when "
+                    + "their claims match no roles.map entry — otherwise a user whose IdP groups are revoked would "
+                    + "silently keep the role they already had. Set roles.sync=never instead if this extension should "
+                    + "not manage roles at all. As an emergency override without the UI, set OIE_OIDC_ROLES_DEFAULT.");
+        }
         return new OidcConfig(enabled,
                 discoveryUrl,
-                enabled ? required(p, "client-id") : p.getProperty("client-id", ""),
+                clientId,
                 p.getProperty("username-claim", "preferred_username"),
                 csv(p.getProperty("allowed-algorithms", "RS256,RS384,RS512,ES256,ES384,ES512")),
-                number(p, "clock-skew-seconds", 60),
-                number(p, "max-token-age-seconds", 300),
-                number(p, "jwks-cache-ttl-seconds", 300),
-                bool(p, "jit.enabled", true),
+                clockSkew,
+                maxTokenAge,
+                jwksTtl,
+                // FALSE when absent, matching what OidcConfigLoader seeds. The two
+                // disagreeing meant any stored policy without the key — an upgrade,
+                // or hand-written properties — silently turned JIT provisioning ON
+                // while the settings tab, which also defaults to "No", showed it
+                // off. Provisioning users is not a default to infer.
+                bool(p, "jit.enabled", false),
                 p.getProperty("jit.email-claim", "email"),
                 p.getProperty("jit.name-claim", "name"),
                 p.getProperty("jit.organization-claim", "organization"),
@@ -55,8 +92,8 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
                 pairs(p.getProperty("linked-accounts", "")),
                 p.getProperty("roles.claim", "groups"),
                 pairs(p.getProperty("roles.map", "")),
-                p.getProperty("roles.default", ""),
-                p.getProperty("roles.sync", "always"),
+                defaultRole,
+                rolesSync,
                 bool(p, "roles.infer", false));
     }
 
