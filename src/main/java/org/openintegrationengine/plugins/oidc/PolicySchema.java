@@ -48,8 +48,17 @@ public final class PolicySchema {
         /** One of {@link Key#choices()}. */
         ENUM,
         /** Comma-separated {@code key=value} entries. */
-        PAIRS
+        PAIRS,
+        /**
+         * Free text that is never echoed back: the settings tab receives
+         * {@link #SECRET_MASK} in place of a stored value, and a save carrying
+         * the mask leaves the stored value untouched.
+         */
+        SECRET
     }
+
+    /** What a SECRET reads as once set. Never a plausible real value. */
+    public static final String SECRET_MASK = "********";
 
     /**
      * @param name    the property name, as stored and as written in config
@@ -69,6 +78,11 @@ public final class PolicySchema {
             new Key("enabled", "false", Kind.BOOLEAN, "Enable OIDC login"),
             new Key("discovery-url", "", Kind.URL, "Discovery URL"),
             new Key("client-id", "", Kind.TEXT, "Client ID"),
+            new Key("client-secret", "", Kind.SECRET, "Client secret"),
+            new Key("web-administrator-url", "", Kind.URL, "Web administrator URL"),
+            new Key("provider-label", "SSO", Kind.TEXT, "Sign-in button label"),
+            new Key("auto-redirect", "false", Kind.BOOLEAN, "Send visitors straight to the provider"),
+            new Key("scopes", "openid profile email", Kind.TEXT, "Scopes"),
             new Key("username-claim", "preferred_username", Kind.TEXT, "Username claim"),
             new Key("allowed-algorithms", "RS256,RS384,RS512,ES256,ES384,ES512", Kind.TEXT, "Allowed algorithms"),
             new Key("clock-skew-seconds", "60", Kind.NUMBER, "Clock skew (seconds)"),

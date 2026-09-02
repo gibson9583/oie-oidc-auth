@@ -12,14 +12,32 @@ var parsePairs = (value) => String(value || "").split(",").map((s) => s.trim()).
   const i = item.indexOf("=");
   return { id: ++nextRowId, ...i > 0 ? { k: item.slice(0, i).trim(), v: item.slice(i + 1).trim() } : { k: item.trim(), v: "" } };
 });
-var serializePairs = (rows) => rows.filter((r) => r.k.trim() && r.v.trim()).map((r) => `${r.k.trim()}=${r.v.trim()}`).join(",");
-var pairProblem = (rows) => {
-  if (rows.some((r) => !!r.k.trim() !== !!r.v.trim())) return "Every row needs both a key and a value \u2014 fill the blank one in, or remove the row.";
+var serializePairs = (rows, isBlank = (v) => !String(v || "").trim()) => rows.filter((r) => r.k.trim() && !isBlank(r.v)).map((r) => `${r.k.trim()}=${r.v.trim()}`).join(",");
+var pairProblem = (rows, isBlank = (v) => !String(v || "").trim()) => {
+  if (rows.some((r) => !!r.k.trim() !== !isBlank(r.v))) return "Every row needs both a key and a value \u2014 fill the blank one in, or remove the row.";
   const keys = rows.map((r) => r.k.trim()).filter(Boolean);
   const duplicate = keys.find((k, i) => keys.indexOf(k) !== i);
   return duplicate ? `"${duplicate}" appears more than once \u2014 only the last would take effect.` : null;
 };
-function PairEditor({ label, value, onChange, onProblem, disabled, keyPlaceholder, valuePlaceholder, addLabel }) {
+function ChoiceSelect({ value, options, placeholder, unknownLabel, disabled, onChange, style }) {
+  const current = String(value || "");
+  return /* @__PURE__ */ React.createElement("select", { style, value: current, disabled, onChange: (e) => onChange(e.target.value) }, /* @__PURE__ */ React.createElement("option", { value: "" }, placeholder || "\u2014 choose \u2014"), options.map((o) => /* @__PURE__ */ React.createElement("option", { key: o, value: o }, o)), current && !options.includes(current) ? /* @__PURE__ */ React.createElement("option", { value: current }, current, " ", unknownLabel || "(unknown)") : null);
+}
+var listOf = (raw, key) => {
+  const inner = raw && typeof raw === "object" && !Array.isArray(raw) && raw.list ? raw.list : raw;
+  const items = inner && typeof inner === "object" && !Array.isArray(inner) && inner[key] !== void 0 ? inner[key] : inner;
+  return Array.isArray(items) ? items : items && typeof items === "object" ? [items] : [];
+};
+var roleNamesOf = (raw) => listOf(raw, "com.diridium.rbac.Role").map((r) => r && r.name).filter(Boolean);
+var userNamesOf = (raw) => listOf(raw, "user").map((u) => u && u.username).filter(Boolean);
+var SUGGESTIONS = (form) => ({
+  "username-claim": ["preferred_username", "email", "upn", "unique_name", "cognito:username", "sub"],
+  "jit.email-claim": ["email", "upn", "mail"],
+  "jit.name-claim": ["name", "given_name", "family_name", "display_name"],
+  "jit.organization-claim": ["organization", "org", "company"],
+  "roles.claim": ["groups", "roles", "cognito:groups", "realm_access.roles", `resource_access.${String(form["client-id"] || "").trim() || "<client-id>"}.roles`]
+});
+function PairEditor({ label, value, onChange, onProblem, disabled, keyPlaceholder, keyOptions, keyUnknownLabel, valuePlaceholder, valueOptions, valueUnknownLabel, valuePrefix, valueCheck, addLabel }) {
   const [rows, setRows] = React.useState(() => parsePairs(value));
   const last = React.useRef(value);
   React.useEffect(() => {
@@ -28,22 +46,26 @@ function PairEditor({ label, value, onChange, onProblem, disabled, keyPlaceholde
       setRows(parsePairs(value));
     }
   }, [value]);
-  const problem = disabled ? null : pairProblem(rows);
+  const isBlank = (v) => {
+    const t = String(v || "").trim();
+    return !t || !!valuePrefix && t === valuePrefix;
+  };
+  const problem = disabled ? null : rows.filter((r) => r.k.trim()).map((r) => valueCheck ? valueCheck(r.v) : null).find(Boolean) || pairProblem(rows, isBlank);
   React.useEffect(() => {
     onProblem(problem);
     return () => onProblem(null);
   }, [problem, onProblem]);
   const commit = (next) => {
     setRows(next);
-    const s = serializePairs(next);
+    const s = serializePairs(next, isBlank);
     if (s !== last.current) {
       last.current = s;
       onChange(s);
     }
   };
   const edit = (id, part, text) => commit(rows.map((r) => r.id === id ? { ...r, [part]: part === "k" ? text.replace(/[,=]/g, "") : text.replace(/,/g, "") } : r));
-  return /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, label), rows.map((row) => /* @__PURE__ */ React.createElement("div", { key: row.id, style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.k, placeholder: keyPlaceholder, disabled, onChange: (e) => edit(row.id, "k", e.target.value) }), /* @__PURE__ */ React.createElement("span", { className: "text-text-faint" }, "\u2192"), /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.v, placeholder: valuePlaceholder, disabled, onChange: (e) => edit(row.id, "v", e.target.value) }), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, title: "Remove", onClick: () => commit(rows.filter((r) => r.id !== row.id)) }, "\xD7"))), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, onClick: () => {
-    setRows([...rows, { id: ++nextRowId, k: "", v: "" }]);
+  return /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, label), rows.map((row) => /* @__PURE__ */ React.createElement("div", { key: row.id, style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, Array.isArray(keyOptions) ? /* @__PURE__ */ React.createElement(ChoiceSelect, { style: { flex: 1 }, value: row.k, options: keyOptions, placeholder: keyPlaceholder, unknownLabel: keyUnknownLabel, disabled, onChange: (v) => edit(row.id, "k", v) }) : /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.k, placeholder: keyPlaceholder, disabled, onChange: (e) => edit(row.id, "k", e.target.value) }), /* @__PURE__ */ React.createElement("span", { className: "text-text-faint" }, "\u2192"), Array.isArray(valueOptions) ? /* @__PURE__ */ React.createElement(ChoiceSelect, { style: { flex: 1 }, value: row.v, options: valueOptions, placeholder: valuePlaceholder, unknownLabel: valueUnknownLabel, disabled, onChange: (v) => edit(row.id, "v", v) }) : /* @__PURE__ */ React.createElement("input", { style: { flex: 1 }, type: "text", value: row.v, placeholder: valuePlaceholder, disabled, onChange: (e) => edit(row.id, "v", e.target.value) }), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, title: "Remove", onClick: () => commit(rows.filter((r) => r.id !== row.id)) }, "\xD7"))), /* @__PURE__ */ React.createElement("button", { className: "btn", type: "button", disabled, onClick: () => {
+    setRows([...rows, { id: ++nextRowId, k: "", v: valuePrefix || "" }]);
   } }, addLabel), problem ? /* @__PURE__ */ React.createElement("div", { style: { color: "var(--err)", fontSize: 12, marginTop: 4 } }, problem) : null);
 }
 var decode = (value) => {
@@ -94,6 +116,34 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
   }, [form, markClean]);
   const saveRef = React.useRef(save);
   saveRef.current = save;
+  const [roleNames, setRoleNames] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const names = roleNamesOf(await api.get("/extensions/rbac/roles"));
+        if (alive && names.length) setRoleNames(names);
+      } catch (e) {
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const [userNames, setUserNames] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const names = userNamesOf(await api.get("/users"));
+        if (alive && names.length) setUserNames(names);
+      } catch (e) {
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
   React.useEffect(() => {
     load();
   }, []);
@@ -101,6 +151,7 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
     setTasks("OIDC Authentication Tasks", [
       taskButton("Save", "save", () => saveRef.current(), { primary: true, task: "doSave", group: "settings_OIDC Authentication" }),
       taskButton("Refresh", "refresh", load),
+      // A pure check: reports, and changes nothing in the form or the engine.
       taskButton("Test connection", "check", async () => {
         try {
           const r = decode(await api.post(`${EXT}/test`, { string: JSON.stringify(formRef.current) }));
@@ -111,7 +162,9 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
       })
     ]);
   }, [load, setTasks]);
-  React.useEffect(() => setSave(() => save), [save, setSave]);
+  React.useEffect(() => {
+    setSave(save);
+  }, [save, setSave]);
   const patch = (key, value) => {
     setForm((f) => ({ ...f, [key]: value }));
     markDirty();
@@ -130,28 +183,51 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
       disabled: locked(f.key),
       onChange: (e) => patch("enabled", String(e.target.checked))
     }
-  ), f.label, pinnedNote(f.key)))), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, schema.filter((f) => f.key !== "enabled" && f.kind !== "pairs").map((f) => /* @__PURE__ */ React.createElement("div", { className: "field", key: f.key }, /* @__PURE__ */ React.createElement("label", null, f.label, pinnedNote(f.key)), f.kind === "boolean" || f.kind === "enum" ? /* @__PURE__ */ React.createElement("select", { value: form[f.key] || "", disabled: locked(f.key), onChange: (e) => patch(f.key, e.target.value) }, (f.kind === "boolean" ? ["true", "false"] : f.choices || []).map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, choiceLabel(f.key, c)))) : /* @__PURE__ */ React.createElement(
-    "input",
-    {
-      type: f.kind === "number" ? "number" : f.kind === "url" ? "url" : "text",
-      value: form[f.key] || "",
-      disabled: locked(f.key),
-      onChange: (e) => patch(f.key, e.target.value)
-    }
-  )))), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, schema.filter((f) => f.kind === "pairs").map((f) => /* @__PURE__ */ React.createElement(
-    PairEditor,
-    {
-      key: f.key,
-      label: f.label + (pinned.includes(f.key) ? " \u2014 pinned" : ""),
-      value: form[f.key] || "",
-      disabled: locked(f.key),
-      addLabel: f.key === "roles.map" ? "Add mapping" : "Link account",
-      keyPlaceholder: f.key === "roles.map" ? "claim value (e.g. oie-admins)" : "engine username",
-      valuePlaceholder: f.key === "roles.map" ? "RBAC role (e.g. Administrator)" : "issuer#subject",
-      onChange: (v) => patch(f.key, v),
-      onProblem: noteProblem(f.key)
-    }
-  ))));
+  ), f.label, pinnedNote(f.key)))), (() => {
+    const suggest = SUGGESTIONS(form);
+    const renderField = (f) => /* @__PURE__ */ React.createElement("div", { className: "field", key: f.key }, /* @__PURE__ */ React.createElement("label", null, f.label, pinnedNote(f.key)), f.kind === "boolean" || f.kind === "enum" ? /* @__PURE__ */ React.createElement("select", { value: form[f.key] || "", disabled: locked(f.key), onChange: (e) => patch(f.key, e.target.value) }, (f.kind === "boolean" ? ["true", "false"] : f.choices || []).map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, choiceLabel(f.key, c)))) : f.key === "roles.default" && roleNames ? /* @__PURE__ */ React.createElement(ChoiceSelect, { value: form[f.key] || "", options: roleNames, placeholder: "\u2014 no default role \u2014", unknownLabel: "(not an existing role)", disabled: locked(f.key), onChange: (v) => patch(f.key, v) }) : f.kind === "secret" ? /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "password",
+        autoComplete: "new-password",
+        value: form[f.key] || "",
+        placeholder: "not set",
+        disabled: locked(f.key),
+        onChange: (e) => patch(f.key, e.target.value)
+      }
+    ) : /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: f.kind === "number" ? "number" : f.kind === "url" ? "url" : "text",
+        value: form[f.key] || "",
+        list: suggest[f.key] ? `oidc-suggest-${f.key}` : void 0,
+        disabled: locked(f.key),
+        onChange: (e) => patch(f.key, e.target.value)
+      }
+    ), suggest[f.key] ? /* @__PURE__ */ React.createElement("datalist", { id: `oidc-suggest-${f.key}` }, suggest[f.key].map((s) => /* @__PURE__ */ React.createElement("option", { key: s, value: s }))) : null);
+    const issuerKnown = String(form._issuer || "").trim();
+    const subjectCheck = (v) => /#\s*$/.test(String(v || "")) ? `Paste the subject after "#" \u2014 the identifier your provider shows for this user (in Keycloak, the user's ID).` : null;
+    return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, schema.filter((f) => f.key !== "enabled" && f.kind !== "pairs").map(renderField)), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, schema.filter((f) => f.kind === "pairs").map((f) => /* @__PURE__ */ React.createElement(
+      PairEditor,
+      {
+        key: f.key,
+        label: f.label + (pinned.includes(f.key) ? " \u2014 pinned" : ""),
+        value: form[f.key] || "",
+        disabled: locked(f.key),
+        addLabel: f.key === "roles.map" ? "Add mapping" : "Link account",
+        keyPlaceholder: f.key === "roles.map" ? "claim value (e.g. oie-admins)" : userNames ? "\u2014 choose a user \u2014" : "engine username",
+        keyOptions: f.key === "linked-accounts" ? userNames : void 0,
+        keyUnknownLabel: "(no such user)",
+        valuePlaceholder: f.key === "roles.map" ? roleNames ? "\u2014 choose a role \u2014" : "RBAC role (e.g. Administrator)" : "issuer#subject",
+        valueOptions: f.key === "roles.map" ? roleNames : void 0,
+        valueUnknownLabel: "(not an existing role)",
+        valuePrefix: f.key === "linked-accounts" && issuerKnown ? `${issuerKnown}#` : "",
+        valueCheck: f.key === "linked-accounts" ? subjectCheck : void 0,
+        onChange: (v) => patch(f.key, v),
+        onProblem: noteProblem(f.key)
+      }
+    ))));
+  })());
 }
 async function register(host) {
   try {

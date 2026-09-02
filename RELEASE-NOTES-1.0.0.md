@@ -6,11 +6,11 @@ engine users on first sign-in, binds every account permanently to
 `issuer#subject`, and maps IdP claims to roles in the RBAC extension — so the
 engine's audit log names real people rather than a shared service account.
 
-**Requires both halves.** This extension owns identity on the engine; the
-browser-facing Authorization Code + PKCE flow runs in the web administrator's
-Node deployment, which holds the client secret. The WAR has no server half and
-never offers SSO. Register one redirect URI at your provider:
-`<web-administrator-origin>/oidc/callback`.
+**Everything is configured here.** This extension runs the whole Authorization
+Code + PKCE flow — the provider redirect, the code exchange with the client
+secret, token validation — and hands the web administrator a one-time ticket to
+sign in with. The web administrator keeps no OIDC configuration. Register one
+redirect URI at your provider: `<web-administrator-url>/oidc/callback`.
 
 ## Fixed
 
@@ -42,6 +42,73 @@ never offers SSO. Register one redirect URI at your provider:
 - An `Error` raised while resolving the user controller escaped `authorizeUser`
   instead of failing closed.
 
+## Sign-in flow
+
+The engine requires `X-Requested-With` on every API request, so the provider's
+redirect cannot land on an engine endpoint. The web administrator's login card
+therefore posts `/extensions/oidcauth/start` (the engine seals the attempt in an
+HttpOnly cookie and returns the provider URL), the provider sends the browser to
+`<web-administrator-url>/oidc/callback` — a route of the web app — and the card
+posts the returned `code` and `state` to `/extensions/oidcauth/callback`. The
+engine checks the state, exchanges the code with the secret and the PKCE
+verifier, validates the ID token including its nonce, and answers with a
+one-time ticket that the card redeems through the ordinary `/users/_login`, so
+the session, the login audit event, and any second factor are exactly what a
+password sign-in gets.
+
+## Settings tab
+
+- Client secret and web administrator URL are policy keys. The secret is never
+  echoed: the tab shows a mask, and saving the mask keeps the stored value.
+- Default role and every claim-to-role mapping target are chosen from the
+  engine's RBAC roles; a stored name RBAC no longer lists stays selected and is
+  marked rather than silently replaced. Linked accounts pick the engine user
+  from a list, and once a sign-in has fetched discovery the `issuer#` half of a
+  new binding is prefilled from the engine's own record of the issuer. All of
+  these fall back to free text when the lists cannot be read.
+- Claim fields suggest the usual names as you type (standard OpenID claims;
+  for the roles claim the provider-specific paths, with your client ID filled
+  in) and stay free text.
+- **Test connection** is a pure check: it verifies discovery and counts the
+  signing keys that could verify a token, and changes nothing.
+- Fixed: choosing **Save** in the unsaved-changes prompt silently discarded the
+  tab's changes while reporting success.
+- A save is audited as **Manage OIDC configuration** with the user and outcome
+  only; the policy body, client secret included, is excluded from the event.
+
+## Hardening after security review
+
+- Only a ticket is a login credential. A bare ID token presented to
+  `/users/_login` — the pre-1.0 shape — is refused without being examined; it
+  was the one route on which the nonce was never checked.
+- An account bound to a provider subject refuses a local password while SSO is
+  active, unless the operator listed it in `linked-accounts`. Before, anyone
+  who could set an engine password on a JIT-created account (the user, through
+  their own profile) kept a way in after the provider removed them.
+- The login throttle keyed on the username hint, which the web client always
+  sends as `oidc`: twenty SSO sign-ins a minute per engine, and twenty
+  anonymous POSTs denied everyone for the next minute. Ticket redemption is a
+  single map lookup on a 256-bit id and is no longer throttled. The callback —
+  the step that costs an outbound token exchange — is throttled per client
+  (first `X-Forwarded-For` hop, which the web administrator's proxy sets and the
+  engine already trusts for audit) and in total, instead of per proxy address.
+- The JWKS fetch ran on nimbus's defaults: 500 ms to connect and read, a 50 KB
+  body. It now has the same bounds as discovery (10 s, 1 MiB) and refetches an
+  unknown key id at most every 30 seconds.
+- The code exchange authenticates with `client_secret_basic`, the method every
+  provider must support (Cognito accepts nothing else), falling back to
+  `client_secret_post` only when discovery says that is all the provider takes.
+- A spent token is remembered for `max-token-age-seconds` plus the clock skew,
+  the whole window in which it would still validate; the last skew seconds of
+  a token's life were replayable.
+- `/public` no longer reports the discovery URL and client ID; the return path
+  is capped at 2 KB so the sealed cookie stays deliverable; **Test connection**
+  is audited (without its body); discovery refreshes no longer hold every
+  concurrent sign-in behind one fetch.
+- Web administrator: sign-out with auto-redirect on shows the sign-in card
+  instead of bouncing straight back to the provider, and a crafted
+  `/oidc/callback?error=` link no longer evicts a signed-in user.
+
 ## Known limitations
 
 No RP-initiated or front-channel logout; confidential client only; one identity
@@ -51,8 +118,10 @@ sign-in. See the README's *Limitations* section for what each means in practice.
 
 ## Verification
 
-96 unit tests, and this build walked end to end on OIE 4.6.0 with RBAC 1.1.2
-against Keycloak: the settings tab rendered from the schema, refused a save
+130 unit tests — including the engine-run flow against a local provider that
+checks the secret, the PKCE verifier, the redirect URI, and the nonce — and this
+build walked end to end on OIE 4.6.0 with RBAC 1.1.2 against Keycloak through
+the engine-hosted flow (start, provider, `/oidc/callback`, ticket redemption): the settings tab rendered from the schema, refused a save
 with no default role, verified discovery plus one reachable signing key on
 **Test connection**, persisted, and the engine logged the policy as ACTIVE;
 a first SSO sign-in JIT-provisioned the user with the IdP's email and name and

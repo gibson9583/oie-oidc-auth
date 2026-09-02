@@ -17,6 +17,7 @@ import javax.ws.rs.core.MediaType;
 import com.mirth.connect.client.core.ClientException;
 import com.mirth.connect.client.core.api.BaseServletInterface;
 import com.mirth.connect.client.core.api.MirthOperation;
+import com.mirth.connect.client.core.api.Param;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -46,6 +47,18 @@ public interface OidcAdminServletInterface extends BaseServletInterface {
     @MirthOperation(name = "getOidcPublicConfiguration", display = "Get public OIDC configuration", auditable = false)
     String publicConfiguration() throws ClientException;
 
+    @POST
+    @Path("/start")
+    @Operation(summary = "Begins a browser sign-in: seals the attempt in a cookie and returns the provider URL to open.")
+    @MirthOperation(name = "startOidcLogin", display = "Start OIDC sign-in", auditable = false)
+    String start(String json) throws ClientException;
+
+    @POST
+    @Path("/callback")
+    @Operation(summary = "Completes a browser sign-in from the code and state the provider returned; answers with a one-time login ticket.")
+    @MirthOperation(name = "completeOidcLogin", display = "Complete OIDC sign-in", auditable = false)
+    String callback(String json) throws ClientException;
+
     @GET
     @Path("/configuration")
     @Operation(summary = "Returns the editable OIDC policy.")
@@ -56,11 +69,17 @@ public interface OidcAdminServletInterface extends BaseServletInterface {
     @Path("/configuration")
     @Operation(summary = "Validates and saves the OIDC policy.")
     @MirthOperation(name = "setOidcConfiguration", display = "Manage OIDC configuration", permission = PERMISSION_MANAGE)
-    void configuration(String json) throws ClientException;
+    // The audit event records THAT the policy was managed, and by whom — not
+    // the policy itself. The body carries the client secret in the clear
+    // whenever it is being set, and the engine's audit log is far more widely
+    // readable than the policy.
+    void configuration(@Param(value = "configuration", excludeFromAudit = true) String json) throws ClientException;
 
     @POST
     @Path("/test")
     @Operation(summary = "Tests discovery and JWKS connectivity for the supplied policy.")
-    @MirthOperation(name = "testOidcConfiguration", display = "Test OIDC configuration", permission = PERMISSION_MANAGE, auditable = false)
-    String test(String json) throws ClientException;
+    @MirthOperation(name = "testOidcConfiguration", display = "Test OIDC configuration", permission = PERMISSION_MANAGE)
+    // Audited: it makes the engine fetch a URL of the caller's choosing, which
+    // is worth a line naming who asked — but not the policy in the body.
+    String test(@Param(value = "configuration", excludeFromAudit = true) String json) throws ClientException;
 }

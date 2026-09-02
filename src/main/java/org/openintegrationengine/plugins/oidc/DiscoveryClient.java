@@ -12,6 +12,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,7 +25,34 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public final class DiscoveryClient {
 
-    public record Metadata(String issuer, String jwksUri) {}
+    /**
+     * What the flow needs from the discovery document. The endpoints may be
+     * blank for a provider that publishes none; token validation does not need
+     * them, and the sign-in flow reports their absence when it does.
+     * {@code tokenEndpointAuthMethods} is the provider's
+     * {@code token_endpoint_auth_methods_supported}, empty when unstated.
+     */
+    public record Metadata(String issuer, String jwksUri, String authorizationEndpoint, String tokenEndpoint,
+            List<String> tokenEndpointAuthMethods) {
+        public Metadata(String issuer, String jwksUri) {
+            this(issuer, jwksUri, "", "", List.of());
+        }
+
+        public Metadata(String issuer, String jwksUri, String authorizationEndpoint, String tokenEndpoint) {
+            this(issuer, jwksUri, authorizationEndpoint, tokenEndpoint, List.of());
+        }
+
+        /**
+         * Whether the code exchange authenticates with {@code client_secret_basic}.
+         * That is the method every provider must support and the spec's default
+         * when a provider says nothing, so it is used unless the provider states
+         * that it takes {@code client_secret_post} and not basic.
+         */
+        public boolean basicClientAuth() {
+            return tokenEndpointAuthMethods.isEmpty() || tokenEndpointAuthMethods.contains("client_secret_basic")
+                    || !tokenEndpointAuthMethods.contains("client_secret_post");
+        }
+    }
 
     private final HttpClient http;
     private final ObjectMapper json = new ObjectMapper();
@@ -102,6 +131,11 @@ public final class DiscoveryClient {
      * bound has to be enforced while reading, by cancelling the subscription.</p>
      */
     private static HttpResponse.BodyHandler<String> bounded(String what) {
+        return bounded(what, MAX_BODY_BYTES);
+    }
+
+    /** Package-visible so the sign-in flow's token exchange is bounded the same way. */
+    static HttpResponse.BodyHandler<String> bounded(String what, int maxBytes) {
         return info -> new HttpResponse.BodySubscriber<String>() {
             private final java.util.concurrent.CompletableFuture<String> result = new java.util.concurrent.CompletableFuture<>();
             private final java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
@@ -121,10 +155,10 @@ public final class DiscoveryClient {
             @Override
             public void onNext(java.util.List<java.nio.ByteBuffer> items) {
                 for (java.nio.ByteBuffer item : items) {
-                    if (buffer.size() + item.remaining() > MAX_BODY_BYTES) {
+                    if (buffer.size() + item.remaining() > maxBytes) {
                         subscription.cancel();
                         result.completeExceptionally(
-                                new IOException(what + " exceeded " + MAX_BODY_BYTES + " bytes; refusing to read further"));
+                                new IOException(what + " exceeded " + maxBytes + " bytes; refusing to read further"));
                         return;
                     }
                     byte[] chunk = new byte[item.remaining()];
@@ -145,10 +179,41 @@ public final class DiscoveryClient {
         };
     }
 
-    public synchronized Metadata get(OidcConfig config) throws Exception {
-        if (cached != null && expires > System.currentTimeMillis()) {
+    /**
+     * The issuer from the last discovery document this client fetched, or null
+     * if it has never fetched one. No network: this is what the settings tab
+     * shows beside linked accounts, whose values must match the token's
+     * {@code iss} exactly — and guessing that from the discovery URL is wrong
+     * for at least one provider (Auth0's issuer ends in a slash the URL lacks).
+     * An issuer does not change with the cache TTL, so an expired entry still
+     * answers.
+     */
+    public synchronized String cachedIssuer() {
+        return cached != null ? cached.issuer() : null;
+    }
+
+    /**
+     * The cached document while it is fresh, else a fetch. The fetch runs
+     * OUTSIDE the lock: held across it, a slow provider made every sign-in that
+     * arrived during a refresh queue for up to the timeout plus the body. Two
+     * threads that miss together fetch twice and the later one wins — a wasted
+     * request, never a wrong answer.
+     */
+    public Metadata get(OidcConfig config) throws Exception {
+        synchronized (this) {
+            if (cached != null && expires > System.currentTimeMillis()) {
+                return cached;
+            }
+        }
+        Metadata fetched = fetch(config);
+        synchronized (this) {
+            cached = fetched;
+            expires = System.currentTimeMillis() + config.jwksCacheTtlSeconds() * 1000;
             return cached;
         }
+    }
+
+    private Metadata fetch(OidcConfig config) throws Exception {
         // A blank URL must say so — falling through to the HTTPS check turns
         // "you haven't entered one" into a baffling protocol complaint.
         if (config.discoveryUrl() == null || config.discoveryUrl().isBlank()) {
@@ -174,10 +239,23 @@ public final class DiscoveryClient {
         }
         // The document is attacker-influencable only if discovery itself is —
         // but a compromised or misconfigured IdP must still not downgrade key
-        // fetching to plaintext.
+        // fetching to plaintext. The same goes for where the browser is sent
+        // and where the code is exchanged.
         OidcConfig.requireHttps(jwksUri, "jwks_uri");
-        cached = new Metadata(issuer, jwksUri);
-        expires = System.currentTimeMillis() + config.jwksCacheTtlSeconds() * 1000;
-        return cached;
+        String authorizationEndpoint = node.path("authorization_endpoint").asText("");
+        String tokenEndpoint = node.path("token_endpoint").asText("");
+        if (!authorizationEndpoint.isBlank()) {
+            OidcConfig.requireHttps(authorizationEndpoint, "authorization_endpoint");
+        }
+        if (!tokenEndpoint.isBlank()) {
+            OidcConfig.requireHttps(tokenEndpoint, "token_endpoint");
+        }
+        List<String> authMethods = new ArrayList<>();
+        for (JsonNode method : node.path("token_endpoint_auth_methods_supported")) {
+            if (method.isTextual()) {
+                authMethods.add(method.asText());
+            }
+        }
+        return new Metadata(issuer, jwksUri, authorizationEndpoint, tokenEndpoint, List.copyOf(authMethods));
     }
 }

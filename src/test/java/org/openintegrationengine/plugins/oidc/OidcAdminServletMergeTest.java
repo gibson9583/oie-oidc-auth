@@ -44,6 +44,8 @@ class OidcAdminServletMergeTest {
     private static Properties stored() {
         Properties p = OidcConfigLoader.defaults();
         p.setProperty("enabled", "true");
+        p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        p.setProperty("web-administrator-url", "https://admin.test");
         p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         p.setProperty("client-id", "from-store");
         p.setProperty("roles.default", "Viewer");
@@ -123,6 +125,25 @@ class OidcAdminServletMergeTest {
             assertFalse(merged.containsKey(reserved), reserved + " must not be persisted");
         }
         assertEquals("upn", merged.getProperty("username-claim"), "the real key in the same body still applies");
+    }
+
+    /**
+     * The mask the GET serves for a secret is not a value. A form that sends it
+     * back untouched keeps the stored secret; anything else replaces it. Without
+     * this every save from the tab would overwrite the secret with eight
+     * asterisks and take SSO down on the next sign-in.
+     */
+    @Test
+    void theSecretMaskLeavesTheStoredSecretUntouched() throws Exception {
+        Properties stored = stored();
+        stored.setProperty("client-secret", "the-real-secret");
+
+        Properties kept = OidcAdminServlet.merge(stored, "{\"client-secret\":\"" + PolicySchema.SECRET_MASK + "\",\"username-claim\":\"upn\"}");
+        assertEquals("the-real-secret", kept.getProperty("client-secret"));
+        assertEquals("upn", kept.getProperty("username-claim"), "the other key in the same body still saves");
+
+        Properties replaced = OidcAdminServlet.merge(stored, "{\"client-secret\":\"a-new-secret\"}");
+        assertEquals("a-new-secret", replaced.getProperty("client-secret"));
     }
 
     /**

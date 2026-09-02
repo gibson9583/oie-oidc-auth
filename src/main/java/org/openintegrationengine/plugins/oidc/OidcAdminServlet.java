@@ -8,10 +8,16 @@ package org.openintegrationengine.plugins.oidc;
 
 import java.util.Properties;
 
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.SecurityContext;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.mirth.connect.client.core.ClientException;
@@ -30,18 +36,31 @@ import com.mirth.connect.server.api.MirthServlet;
 public final class OidcAdminServlet extends MirthServlet implements OidcAdminServletInterface {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Logger log = LogManager.getLogger(OidcAdminServlet.class);
+    private static final String TXN_COOKIE = "oie-oidc-txn";
+    /** One HTTP client for the token exchanges; the flow itself is stateless. */
+    private static final OidcFlow FLOW = new OidcFlow();
+    /** The callback is pre-auth and costs an outbound exchange; bound how fast it can be driven. */
+    private static final FlowThrottle THROTTLE = new FlowThrottle();
 
-    public OidcAdminServlet(@Context HttpServletRequest request, @Context SecurityContext sc) {
+    private final HttpServletResponse response;
+
+    public OidcAdminServlet(@Context HttpServletRequest request, @Context SecurityContext sc,
+            @Context HttpServletResponse response) {
         super(request, sc, PLUGIN_POINT, !isPublicPath(request));
+        this.response = response;
     }
 
-    /** Trailing-slash tolerant: {@code /public/} must stay pre-auth too. */
+    /**
+     * The three pre-auth operations: what the login screen asks before anyone is
+     * signed in. Trailing-slash tolerant, so {@code /public/} stays pre-auth too.
+     */
     private static boolean isPublicPath(HttpServletRequest request) {
         String uri = request.getRequestURI();
         while (uri.endsWith("/")) {
             uri = uri.substring(0, uri.length() - 1);
         }
-        return uri.endsWith("/public");
+        return uri.endsWith("/public") || uri.endsWith("/start") || uri.endsWith("/callback");
     }
 
     @Override
@@ -56,10 +75,118 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
         boolean configured = !OidcAuthorizationPlugin.killSwitchActive() && config != null && config.enabled();
         out.put("configured", configured);
         if (configured) {
-            out.put("discoveryUrl", config.discoveryUrl());
-            out.put("clientId", config.clientId());
+            // What the login card needs to draw the button, and nothing else:
+            // the provider and client are the engine's business now that it
+            // runs the flow, and this answers anyone who asks.
+            out.put("providerLabel", config.providerLabel());
+            out.put("autoRedirect", config.autoRedirect());
         }
         return out.toString();
+    }
+
+    /* ---- the browser-facing sign-in flow, run by the engine ---------------- */
+
+    @Override
+    @DontCheckAuthorized
+    public String start(String body) throws ClientException {
+        try {
+            OidcConfig config = OidcAuthorizationPlugin.currentConfig();
+            OidcTokenValidator validator = OidcAuthorizationPlugin.currentValidator();
+            if (OidcAuthorizationPlugin.killSwitchActive() || config == null || !config.enabled() || validator == null) {
+                return result(false, "SSO is disabled on this engine.");
+            }
+            JsonNode in = flowBody(body);
+            DiscoveryClient.Metadata metadata = validator.discovery().get(config);
+            OidcFlow.Start started = FLOW.start(config, metadata, in.path("return").asText("/"),
+                    "login".equals(in.path("prompt").asText("")), System.currentTimeMillis());
+            setTransactionCookie(started.sealed(), config, OidcTransaction.TTL_MILLIS / 1000);
+            ObjectNode out = JSON.createObjectNode();
+            out.put("ok", true);
+            out.put("authorizeUrl", started.authorizeUrl());
+            return out.toString();
+        } catch (Exception e) {
+            log.warn("OIDC sign-in could not start: {}", e.toString());
+            return result(false, "SSO is unavailable. Use local sign-in.");
+        }
+    }
+
+    @Override
+    @DontCheckAuthorized
+    public String callback(String body) throws ClientException {
+        String sealed = transactionCookie();
+        OidcConfig config = OidcAuthorizationPlugin.currentConfig();
+        // One attempt per seal, whatever happens next: a cookie that survived a
+        // failure could otherwise be retried with a different code.
+        clearTransactionCookie(config);
+        try {
+            THROTTLE.hit(FlowThrottle.clientOf(request.getHeader("X-Forwarded-For"), request.getRemoteAddr()),
+                    System.currentTimeMillis());
+            OidcTokenValidator validator = OidcAuthorizationPlugin.currentValidator();
+            LoginTicketStore tickets = OidcAuthorizationPlugin.currentTickets();
+            if (OidcAuthorizationPlugin.killSwitchActive() || config == null || !config.enabled() || validator == null
+                    || tickets == null) {
+                return result(false, "SSO is disabled on this engine.");
+            }
+            JsonNode in = flowBody(body);
+            if (!in.path("error").asText("").isBlank()) {
+                return result(false, "The identity provider declined sign-in.");
+            }
+            DiscoveryClient.Metadata metadata = validator.discovery().get(config);
+            OidcFlow.Completion done = FLOW.complete(config, metadata, validator, sealed,
+                    in.path("code").asText(null), in.path("state").asText(null), System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            ObjectNode out = JSON.createObjectNode();
+            out.put("ok", true);
+            out.put("ticket", tickets.issue(done.idToken(), now));
+            out.put("returnPath", done.returnPath());
+            return out.toString();
+        } catch (Exception e) {
+            log.warn("OIDC sign-in could not complete: {}", e.toString());
+            return result(false, "SSO sign-in could not be completed. Try again, or use local sign-in.");
+        }
+    }
+
+    /** The flow's bodies are small JSON objects, possibly wrapped by the engine's String envelope. */
+    private static JsonNode flowBody(String body) throws Exception {
+        JsonNode node = JSON.readTree(body == null || body.isBlank() ? "{}" : body);
+        if (node.isObject() && node.size() == 1 && node.path("string").isTextual()) {
+            node = JSON.readTree(node.get("string").asText());
+        }
+        return node.isObject() ? node : JSON.createObjectNode();
+    }
+
+    private static String result(boolean ok, String message) {
+        ObjectNode out = JSON.createObjectNode();
+        out.put("ok", ok);
+        out.put("message", message);
+        return out.toString();
+    }
+
+    private String transactionCookie() {
+        Cookie[] cookies = request.getCookies();
+        if (cookies != null) {
+            for (Cookie cookie : cookies) {
+                if (TXN_COOKIE.equals(cookie.getName())) {
+                    return cookie.getValue();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * HttpOnly and SameSite=Lax; Secure whenever the web administrator is
+     * reached over HTTPS. Path=/ rather than this servlet's path so it does not
+     * depend on how the engine API is mounted in front of the browser.
+     */
+    private void setTransactionCookie(String value, OidcConfig config, long maxAgeSeconds) {
+        boolean secure = config != null && config.webAdministratorUrl().startsWith("https://");
+        response.addHeader("Set-Cookie", TXN_COOKIE + "=" + value + "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
+                + maxAgeSeconds + (secure ? "; Secure" : ""));
+    }
+
+    private void clearTransactionCookie(OidcConfig config) {
+        setTransactionCookie("", config, 0);
     }
 
     @Override
@@ -68,6 +195,13 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
             // Live policy + operator pins — what the engine actually enforces.
             Properties effective = OidcConfigLoader.withOverrides(OidcAuthorizationPlugin.currentProperties());
             ObjectNode out = toNode(effective);
+            // A secret is never echoed. The tab shows the mask, and merge() below
+            // treats the mask coming back as "leave it".
+            for (PolicySchema.Key key : PolicySchema.KEYS) {
+                if (key.kind() == PolicySchema.Kind.SECRET && !effective.getProperty(key.name(), "").isEmpty()) {
+                    out.put(key.name(), PolicySchema.SECRET_MASK);
+                }
+            }
             // Reserved keys carrying EFFECTIVE state, which the stored properties
             // cannot express. Without them the tab shows a policy that parsed and
             // applied — "Enable OIDC login" ticked — in exactly the two cases
@@ -79,9 +213,20 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
             if (error != null) {
                 out.put("_error", error);
             }
-            // The one value IdP setup needs and the tab never showed, sending
-            // operators to the README mid-task.
-            out.put("_redirectUri", "<web-administrator-origin>/oidc/callback");
+            // The one value IdP setup needs. Built from the stored web
+            // administrator URL — shown even while the policy is off or
+            // rejected, because registering it at the provider comes first.
+            String base = effective.getProperty("web-administrator-url", "").trim().replaceAll("/+$", "");
+            out.put("_redirectUri", (base.isEmpty() ? "<web-administrator-url>" : base) + OidcFlow.CALLBACK_PATH);
+            // The issuer as the engine has actually seen it, once any sign-in has
+            // fetched discovery. A linked account's value is issuer#subject and
+            // must match the token's iss byte for byte; deriving it from the
+            // discovery URL is wrong for some providers, so the tab only ever
+            // offers this — and offers nothing before the engine knows.
+            String issuer = OidcAuthorizationPlugin.currentIssuer();
+            if (issuer != null) {
+                out.put("_issuer", issuer);
+            }
             // Which keys an operator pinned via OIE_OIDC_* / system property.
             // Those win over anything saved here, so a field the form appears to
             // control but cannot is worth naming rather than letting someone
@@ -139,6 +284,13 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
         // Whitelisted to catalogued keys, so the reserved "_" reporting keys the
         // GET adds cannot arrive here as policy however the form round-trips.
         Properties incoming = OidcConfigLoader.fromJson(body);
+        // The mask the GET served for a secret is not a value. A form that
+        // round-trips it untouched means "keep what is stored".
+        for (PolicySchema.Key key : PolicySchema.KEYS) {
+            if (key.kind() == PolicySchema.Kind.SECRET && PolicySchema.SECRET_MASK.equals(incoming.getProperty(key.name()))) {
+                incoming.remove(key.name());
+            }
+        }
         // Never persist a PINNED value. The GET serves effective values, so
         // the form is holding whatever an OIE_OIDC_* variable or system
         // property overrode — and saving would write that into the stored
