@@ -29,7 +29,26 @@ const pairProblem=(rows)=>{
  const duplicate=keys.find((k,i)=>keys.indexOf(k)!==i);
  return duplicate?`"${duplicate}" appears more than once — only the last would take effect.`:null;
 };
-function PairEditor({label,value,onChange,onProblem,disabled,keyPlaceholder,valuePlaceholder,addLabel}){
+// A select over names the engine knows that never swallows one it does not: a
+// role typed before RBAC listed it, or renamed since, stays visible and selected
+// — marked — instead of snapping to the first option and quietly rewriting the
+// policy on the next save.
+function ChoiceSelect({value,options,placeholder,disabled,onChange,style}){
+ const current=String(value||'');
+ return <select style={style} value={current} disabled={disabled} onChange={e=>onChange(e.target.value)}>
+  <option value="">{placeholder||'— choose —'}</option>
+  {options.map(o=><option key={o} value={o}>{o}</option>)}
+  {current&&!options.includes(current)?<option value={current}>{current} (not an existing role)</option>:null}
+ </select>}
+// The RBAC role list in whichever shape the engine's serializer hands over: the
+// XStream root key may or may not have been unwrapped, and a one-role list
+// arrives as a bare object rather than an array.
+const roleNamesOf=(raw)=>{
+ const inner=raw&&typeof raw==='object'&&!Array.isArray(raw)&&raw.list?raw.list:raw;
+ const roles=inner&&typeof inner==='object'&&!Array.isArray(inner)&&inner['com.diridium.rbac.Role']!==undefined?inner['com.diridium.rbac.Role']:inner;
+ const list=Array.isArray(roles)?roles:roles&&typeof roles==='object'?[roles]:[];
+ return list.map(r=>r&&r.name).filter(Boolean);};
+function PairEditor({label,value,onChange,onProblem,disabled,keyPlaceholder,valuePlaceholder,valueOptions,addLabel}){
  const [rows,setRows]=React.useState(()=>parsePairs(value));
  const last=React.useRef(value);
  // Refresh/load replaced the form value externally — rebuild the rows.
@@ -48,7 +67,9 @@ function PairEditor({label,value,onChange,onProblem,disabled,keyPlaceholder,valu
   {rows.map((row)=><div key={row.id} style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
    <input style={{flex:1}} type="text" value={row.k} placeholder={keyPlaceholder} disabled={disabled} onChange={e=>edit(row.id,'k',e.target.value)}/>
    <span className="text-text-faint">→</span>
-   <input style={{flex:1}} type="text" value={row.v} placeholder={valuePlaceholder} disabled={disabled} onChange={e=>edit(row.id,'v',e.target.value)}/>
+   {Array.isArray(valueOptions)
+    ? <ChoiceSelect style={{flex:1}} value={row.v} options={valueOptions} placeholder={valuePlaceholder} disabled={disabled} onChange={v=>edit(row.id,'v',v)}/>
+    : <input style={{flex:1}} type="text" value={row.v} placeholder={valuePlaceholder} disabled={disabled} onChange={e=>edit(row.id,'v',e.target.value)}/>}
    <button className="btn" type="button" disabled={disabled} title="Remove" onClick={()=>commit(rows.filter(r=>r.id!==row.id))}>×</button>
   </div>)}
   <button className="btn" type="button" disabled={disabled} onClick={()=>{setRows([...rows,{id:++nextRowId,k:'',v:''}]);}}>{addLabel}</button>
@@ -97,6 +118,13 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
   catch(e){toast(`OIDC configuration saved, but the tab could not re-read it: ${e.message||'refresh to confirm.'}`,'warn');}
   return true;},[form,markClean]);
  const saveRef=React.useRef(save);saveRef.current=save;
+ // The RBAC role list, for the two fields that name roles. null = unavailable
+ // (RBAC not installed, or this user cannot read roles), and those fields stay
+ // free text. The engine only checks that a default role is SET, so a typo in a
+ // typed name surfaces later, at someone's login, as "role does not exist;
+ // leaving role unchanged" — a list removes the typo.
+ const [roleNames,setRoleNames]=React.useState(null);
+ React.useEffect(()=>{let alive=true;(async()=>{try{const names=roleNamesOf(await api.get('/extensions/rbac/roles'));if(alive&&names.length)setRoleNames(names);}catch(e){/* free text */}})();return()=>{alive=false;};},[]);
  // Fetch exactly once per mount; the Refresh task re-runs it on demand.
  // eslint-disable-next-line react-hooks/exhaustive-deps
  React.useEffect(()=>{load();},[]);
@@ -107,7 +135,13 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
   taskButton('Refresh','refresh',load),
   taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));toast(`OIDC verified: ${r.issuer||'issuer'} — ${r.keyCount||0} signing key(s) reachable`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
  ]);},[load,setTasks]);
- React.useEffect(()=>setSave(()=>save),[save,setSave]);const patch=(key,value)=>{setForm(f=>({...f,[key]:value}));markDirty();};
+ // The host stores what it is given and CALLS it when the operator picks
+ // "Save" in the unsaved-changes prompt (settings.tsx: saveRef.current()). This
+ // used to register ()=>save — a function that RETURNS save — so that call
+ // handed back a function, which is not === false, and the host proceeded as if
+ // the save had succeeded: changes were discarded behind an apparent save.
+ // Register the save itself, as every built-in tab does.
+ React.useEffect(()=>{setSave(save);},[save,setSave]);const patch=(key,value)=>{setForm(f=>({...f,[key]:value}));markDirty();};
  if(error)return <div className="p-4" style={{color:'var(--err)'}}>{error}</div>;if(!form)return <div className="p-4 text-text-faint">Loading…</div>;
  // Effective state the stored policy cannot express (see the servlet's reserved
  // "_" keys): an emergency switch thrown outside the UI, and a policy the engine
@@ -147,14 +181,17 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
     ? <select value={form[f.key]||''} disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}>
        {(f.kind==='boolean'?['true','false']:f.choices||[]).map(c=><option key={c} value={c}>{choiceLabel(f.key,c)}</option>)}
       </select>
-    : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''}
+    : f.key==='roles.default'&&roleNames
+     ? <ChoiceSelect value={form[f.key]||''} options={roleNames} placeholder="— no default role —" disabled={locked(f.key)} onChange={v=>patch(f.key,v)}/>
+     : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''}
        disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}/>}
   </div>)}</div>
  <div className="mt-4" style={{maxWidth:560}}>{schema.filter(f=>f.kind==='pairs').map(f=>
   <PairEditor key={f.key} label={f.label+(pinned.includes(f.key)?' — pinned':'')} value={form[f.key]||''}
    disabled={locked(f.key)} addLabel={f.key==='roles.map'?'Add mapping':'Link account'}
    keyPlaceholder={f.key==='roles.map'?'claim value (e.g. oie-admins)':'engine username'}
-   valuePlaceholder={f.key==='roles.map'?'RBAC role (e.g. Administrator)':'issuer#subject'}
+   valuePlaceholder={f.key==='roles.map'?(roleNames?'— choose a role —':'RBAC role (e.g. Administrator)'):'issuer#subject'}
+   valueOptions={f.key==='roles.map'?roleNames:undefined}
    onChange={v=>patch(f.key,v)} onProblem={noteProblem(f.key)}/>)}
  </div>
  </div>}
