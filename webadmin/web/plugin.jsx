@@ -57,11 +57,11 @@ const userNamesOf=(raw)=>listOf(raw,'user').map(u=>u&&u.username).filter(Boolean
 // often wrong (it is why the engine warns when it finds no values), so its list
 // carries the exact provider paths, with this policy's client ID filled in.
 const SUGGESTIONS=(form)=>({
- 'username-claim':['preferred_username','email','upn','unique_name','sub'],
+ 'username-claim':['preferred_username','email','upn','unique_name','cognito:username','sub'],
  'jit.email-claim':['email','upn','mail'],
  'jit.name-claim':['name','given_name','family_name','display_name'],
  'jit.organization-claim':['organization','org','company'],
- 'roles.claim':['groups','roles','realm_access.roles',`resource_access.${String(form['client-id']||'').trim()||'<client-id>'}.roles`]});
+ 'roles.claim':['groups','roles','cognito:groups','realm_access.roles',`resource_access.${String(form['client-id']||'').trim()||'<client-id>'}.roles`]});
 // Rarely changed once set, and never the reason SSO is not working; folded
 // away so the tab leads with what decides identity and access.
 const ADVANCED=new Set(['jit.email-claim','jit.name-claim','jit.organization-claim','allowed-algorithms','clock-skew-seconds','max-token-age-seconds','jwks-cache-ttl-seconds']);
@@ -149,11 +149,6 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  // Likewise the engine's users, for the left side of a linked account.
  const [userNames,setUserNames]=React.useState(null);
  React.useEffect(()=>{let alive=true;(async()=>{try{const names=userNamesOf(await api.get('/users'));if(alive&&names.length)setUserNames(names);}catch(e){/* free text */}})();return()=>{alive=false;};},[]);
- // The issuer, for the right side: a subject only means something with its
- // issuer in front, and the operator should not have to know the convention.
- // Test connection reports the authoritative value; until it has run, the
- // discovery URL minus its well-known suffix is what every provider uses.
- const [issuer,setIssuer]=React.useState('');
  // Fetch exactly once per mount; the Refresh task re-runs it on demand.
  // eslint-disable-next-line react-hooks/exhaustive-deps
  React.useEffect(()=>{load();},[]);
@@ -162,7 +157,8 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
  React.useEffect(()=>{setTasks('OIDC Authentication Tasks',[
   taskButton('Save','save',()=>saveRef.current(),{primary:true,task:'doSave',group:'settings_OIDC Authentication'}),
   taskButton('Refresh','refresh',load),
-  taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));if(r.issuer)setIssuer(String(r.issuer));toast(`OIDC verified: ${r.issuer||'issuer'} — ${r.keyCount||0} signing key(s) reachable`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
+  // A pure check: reports, and changes nothing in the form or the engine.
+  taskButton('Test connection','check',async()=>{try{const r=decode(await api.post(`${EXT}/test`,{string:JSON.stringify(formRef.current)}));toast(`OIDC verified: ${r.issuer||'issuer'} — ${r.keyCount||0} signing key(s) reachable`,'success');}catch(e){toast(e.message||'OIDC connection test failed.','error');}})
  ]);},[load,setTasks]);
  // The host stores what it is given and CALLS it when the operator picks
  // "Save" in the unsaved-changes prompt (settings.tsx: saveRef.current()). This
@@ -217,7 +213,12 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
        disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}/>}
    {suggest[f.key]?<datalist id={`oidc-suggest-${f.key}`}>{suggest[f.key].map(s=><option key={s} value={s}/>)}</datalist>:null}
   </div>;
-  const issuerGuess=issuer||String(form['discovery-url']||'').trim().replace(/\/\.well-known\/openid-configuration\/?$/,'');
+  // Only the issuer the ENGINE reports (its own discovery result, after a
+  // sign-in has fetched it). A linked account must match the token's iss
+  // exactly, and deriving it from the discovery URL is wrong for some
+  // providers — Auth0's issuer ends in a slash the URL lacks. Before the
+  // engine knows, the row is left for the operator: placeholder only.
+  const issuerKnown=String(form._issuer||'').trim();
   const subjectCheck=(v)=>/#\s*$/.test(String(v||''))?'Paste the subject after "#" — the identifier your provider shows for this user (in Keycloak, the user\'s ID).':null;
   return <>
    <div className="grid grid-cols-2 gap-4">{schema.filter(f=>f.key!=='enabled'&&f.kind!=='pairs'&&!ADVANCED.has(f.key)).map(renderField)}</div>
@@ -228,7 +229,7 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
      keyOptions={f.key==='linked-accounts'?userNames:undefined} keyUnknownLabel="(no such user)"
      valuePlaceholder={f.key==='roles.map'?(roleNames?'— choose a role —':'RBAC role (e.g. Administrator)'):'issuer#subject'}
      valueOptions={f.key==='roles.map'?roleNames:undefined} valueUnknownLabel="(not an existing role)"
-     valuePrefix={f.key==='linked-accounts'&&issuerGuess?`${issuerGuess}#`:''}
+     valuePrefix={f.key==='linked-accounts'&&issuerKnown?`${issuerKnown}#`:''}
      valueCheck={f.key==='linked-accounts'?subjectCheck:undefined}
      onChange={v=>patch(f.key,v)} onProblem={noteProblem(f.key)}/>)}
    </div>

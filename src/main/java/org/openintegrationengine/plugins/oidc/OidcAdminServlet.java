@@ -82,6 +82,15 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
             // The one value IdP setup needs and the tab never showed, sending
             // operators to the README mid-task.
             out.put("_redirectUri", "<web-administrator-origin>/oidc/callback");
+            // The issuer as the engine has actually seen it, once any sign-in has
+            // fetched discovery. A linked account's value is issuer#subject and
+            // must match the token's iss byte for byte; deriving it from the
+            // discovery URL is wrong for some providers, so the tab only ever
+            // offers this — and offers nothing before the engine knows.
+            String issuer = OidcAuthorizationPlugin.currentIssuer();
+            if (issuer != null) {
+                out.put("_issuer", issuer);
+            }
             // Which keys an operator pinned via OIE_OIDC_* / system property.
             // Those win over anything saved here, so a field the form appears to
             // control but cannot is worth naming rather than letting someone

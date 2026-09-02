@@ -31,11 +31,11 @@ var listOf = (raw, key) => {
 var roleNamesOf = (raw) => listOf(raw, "com.diridium.rbac.Role").map((r) => r && r.name).filter(Boolean);
 var userNamesOf = (raw) => listOf(raw, "user").map((u) => u && u.username).filter(Boolean);
 var SUGGESTIONS = (form) => ({
-  "username-claim": ["preferred_username", "email", "upn", "unique_name", "sub"],
+  "username-claim": ["preferred_username", "email", "upn", "unique_name", "cognito:username", "sub"],
   "jit.email-claim": ["email", "upn", "mail"],
   "jit.name-claim": ["name", "given_name", "family_name", "display_name"],
   "jit.organization-claim": ["organization", "org", "company"],
-  "roles.claim": ["groups", "roles", "realm_access.roles", `resource_access.${String(form["client-id"] || "").trim() || "<client-id>"}.roles`]
+  "roles.claim": ["groups", "roles", "cognito:groups", "realm_access.roles", `resource_access.${String(form["client-id"] || "").trim() || "<client-id>"}.roles`]
 });
 var ADVANCED = /* @__PURE__ */ new Set(["jit.email-claim", "jit.name-claim", "jit.organization-claim", "allowed-algorithms", "clock-skew-seconds", "max-token-age-seconds", "jwks-cache-ttl-seconds"]);
 function PairEditor({ label, value, onChange, onProblem, disabled, keyPlaceholder, keyOptions, keyUnknownLabel, valuePlaceholder, valueOptions, valueUnknownLabel, valuePrefix, valueCheck, addLabel }) {
@@ -145,7 +145,6 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
       alive = false;
     };
   }, []);
-  const [issuer, setIssuer] = React.useState("");
   React.useEffect(() => {
     load();
   }, []);
@@ -153,10 +152,10 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
     setTasks("OIDC Authentication Tasks", [
       taskButton("Save", "save", () => saveRef.current(), { primary: true, task: "doSave", group: "settings_OIDC Authentication" }),
       taskButton("Refresh", "refresh", load),
+      // A pure check: reports, and changes nothing in the form or the engine.
       taskButton("Test connection", "check", async () => {
         try {
           const r = decode(await api.post(`${EXT}/test`, { string: JSON.stringify(formRef.current) }));
-          if (r.issuer) setIssuer(String(r.issuer));
           toast(`OIDC verified: ${r.issuer || "issuer"} \u2014 ${r.keyCount || 0} signing key(s) reachable`, "success");
         } catch (e) {
           toast(e.message || "OIDC connection test failed.", "error");
@@ -197,7 +196,7 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
         onChange: (e) => patch(f.key, e.target.value)
       }
     ), suggest[f.key] ? /* @__PURE__ */ React.createElement("datalist", { id: `oidc-suggest-${f.key}` }, suggest[f.key].map((s) => /* @__PURE__ */ React.createElement("option", { key: s, value: s }))) : null);
-    const issuerGuess = issuer || String(form["discovery-url"] || "").trim().replace(/\/\.well-known\/openid-configuration\/?$/, "");
+    const issuerKnown = String(form._issuer || "").trim();
     const subjectCheck = (v) => /#\s*$/.test(String(v || "")) ? `Paste the subject after "#" \u2014 the identifier your provider shows for this user (in Keycloak, the user's ID).` : null;
     return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, schema.filter((f) => f.key !== "enabled" && f.kind !== "pairs" && !ADVANCED.has(f.key)).map(renderField)), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, schema.filter((f) => f.kind === "pairs").map((f) => /* @__PURE__ */ React.createElement(
       PairEditor,
@@ -213,7 +212,7 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
         valuePlaceholder: f.key === "roles.map" ? roleNames ? "\u2014 choose a role \u2014" : "RBAC role (e.g. Administrator)" : "issuer#subject",
         valueOptions: f.key === "roles.map" ? roleNames : void 0,
         valueUnknownLabel: "(not an existing role)",
-        valuePrefix: f.key === "linked-accounts" && issuerGuess ? `${issuerGuess}#` : "",
+        valuePrefix: f.key === "linked-accounts" && issuerKnown ? `${issuerKnown}#` : "",
         valueCheck: f.key === "linked-accounts" ? subjectCheck : void 0,
         onChange: (v) => patch(f.key, v),
         onProblem: noteProblem(f.key)

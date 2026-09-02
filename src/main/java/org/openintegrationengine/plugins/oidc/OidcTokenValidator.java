@@ -46,6 +46,11 @@ public final class OidcTokenValidator {
         this.discovery = discovery;
     }
 
+    /** The issuer this validator's discovery has seen, or null. Never fetches. */
+    String cachedIssuer() {
+        return discovery.cachedIssuer();
+    }
+
     public JWTClaimsSet validate(String token) throws Exception {
         DiscoveryClient.Metadata metadata = discovery.get(config);
         SignedJWT parsed = SignedJWT.parse(token);

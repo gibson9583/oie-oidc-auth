@@ -167,6 +167,17 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         return current != null ? current.config : null;
     }
 
+    /**
+     * The issuer the live validator has actually seen, or null before the first
+     * sign-in. For the settings tab's linked accounts, which must carry the
+     * token's exact {@code iss}. Read-only: nothing here fetches.
+     */
+    static String currentIssuer() {
+        OidcAuthorizationPlugin current = instance;
+        OidcTokenValidator live = current != null ? current.validator : null;
+        return live != null ? live.cachedIssuer() : null;
+    }
+
     /** Why the stored policy is not in force, or null. For the settings tab. */
     static String currentError() {
         OidcAuthorizationPlugin current = instance;

@@ -7,6 +7,7 @@
 package org.openintegrationengine.plugins.oidc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -96,6 +97,26 @@ class DiscoveryClientTest {
         client.get(config);
         client.get(config);
         assertEquals(1, discoveryFetches.get(), "within the TTL the document must be served from cache");
+    }
+
+    /**
+     * What the settings tab offers beside linked accounts: the issuer as the
+     * engine has actually seen it, and nothing before then. Asking must never
+     * fetch — the tab reads it on every GET of the configuration.
+     */
+    @Test
+    void cachedIssuerIsKnownOnlyOnceDiscoveryHasBeenFetched() throws Exception {
+        DiscoveryClient client = new DiscoveryClient();
+        OidcConfig config = config(300);
+
+        assertNull(client.cachedIssuer(), "nothing has been fetched yet");
+        assertEquals(0, discoveryFetches.get(), "asking must not fetch");
+
+        client.get(config);
+        assertEquals(base, client.cachedIssuer());
+        assertEquals(1, discoveryFetches.get(), "and asking afterwards must not fetch either");
+        client.cachedIssuer();
+        assertEquals(1, discoveryFetches.get());
     }
 
     /**

@@ -145,6 +145,19 @@ public final class DiscoveryClient {
         };
     }
 
+    /**
+     * The issuer from the last discovery document this client fetched, or null
+     * if it has never fetched one. No network: this is what the settings tab
+     * shows beside linked accounts, whose values must match the token's
+     * {@code iss} exactly — and guessing that from the discovery URL is wrong
+     * for at least one provider (Auth0's issuer ends in a slash the URL lacks).
+     * An issuer does not change with the cache TTL, so an expired entry still
+     * answers.
+     */
+    public synchronized String cachedIssuer() {
+        return cached != null ? cached.issuer() : null;
+    }
+
     public synchronized Metadata get(OidcConfig config) throws Exception {
         if (cached != null && expires > System.currentTimeMillis()) {
             return cached;
