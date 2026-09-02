@@ -44,6 +44,8 @@ class OidcAuthorizationPluginTest {
     private static OidcAuthorizationPlugin configured() throws Exception {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
+        p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        p.setProperty("web-administrator-url", "https://admin.test");
         p.setProperty("roles.default", "Viewer");   // required whenever RBAC is on the classpath
         p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
@@ -92,6 +94,8 @@ class OidcAuthorizationPluginTest {
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         Properties stored = OidcConfigLoader.defaults();
         stored.setProperty("enabled", "true");
+        stored.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        stored.setProperty("web-administrator-url", "https://admin.test");
         stored.setProperty("roles.default", "Viewer");
         stored.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         stored.setProperty("client-id", "client");
@@ -124,6 +128,8 @@ class OidcAuthorizationPluginTest {
     private static OidcAuthorizationPlugin accepting(OidcTokenValidator validator) throws Exception {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
+        p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        p.setProperty("web-administrator-url", "https://admin.test");
         p.setProperty("roles.default", "Viewer");
         p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         p.setProperty("client-id", "client");

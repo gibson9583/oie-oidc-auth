@@ -20,6 +20,8 @@ class OidcConfigTest {
     private static Properties enabled() {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
+        p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        p.setProperty("web-administrator-url", "https://admin.test");
         p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
         // Mandatory whenever RBAC is on the classpath, which it is here. See

@@ -206,7 +206,12 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
       </select>
     : f.key==='roles.default'&&roleNames
      ? <ChoiceSelect value={form[f.key]||''} options={roleNames} placeholder="— no default role —" unknownLabel="(not an existing role)" disabled={locked(f.key)} onChange={v=>patch(f.key,v)}/>
-     : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''} list={suggest[f.key]?`oidc-suggest-${f.key}`:undefined}
+     : f.kind==='secret'
+      // Never echoed: the engine sends a mask once a value is stored, and a save
+      // carrying the mask leaves it as it is. Typing replaces it.
+      ? <input type="password" autoComplete="new-password" value={form[f.key]||''} placeholder="not set"
+         disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}/>
+      : <input type={f.kind==='number'?'number':f.kind==='url'?'url':'text'} value={form[f.key]||''} list={suggest[f.key]?`oidc-suggest-${f.key}`:undefined}
        disabled={locked(f.key)} onChange={e=>patch(f.key,e.target.value)}/>}
    {suggest[f.key]?<datalist id={`oidc-suggest-${f.key}`}>{suggest[f.key].map(s=><option key={s} value={s}/>)}</datalist>:null}
   </div>;

@@ -6,11 +6,12 @@ engine users on first sign-in, binds every account permanently to
 `issuer#subject`, and maps IdP claims to roles in the RBAC extension — so the
 engine's audit log names real people rather than a shared service account.
 
-**Requires both halves.** This extension owns identity on the engine; the
-browser-facing Authorization Code + PKCE flow runs in the web administrator's
-Node deployment, which holds the client secret. The WAR has no server half and
-never offers SSO. Register one redirect URI at your provider:
-`<web-administrator-origin>/oidc/callback`.
+**Everything is configured here.** This extension runs the whole Authorization
+Code + PKCE flow — the provider redirect, the code exchange with the client
+secret, token validation — and hands the web administrator a one-time ticket to
+sign in with. The web administrator keeps no OIDC configuration, and SSO works
+identically in its Node/Docker deployment and in the WAR. Register one redirect
+URI at your provider: `<web-administrator-url>/oidc/callback`.
 
 ## Fixed
 
@@ -42,8 +43,24 @@ never offers SSO. Register one redirect URI at your provider:
 - An `Error` raised while resolving the user controller escaped `authorizeUser`
   instead of failing closed.
 
+## Sign-in flow
+
+The engine requires `X-Requested-With` on every API request, so the provider's
+redirect cannot land on an engine endpoint. The web administrator's login card
+therefore posts `/extensions/oidcauth/start` (the engine seals the attempt in an
+HttpOnly cookie and returns the provider URL), the provider sends the browser to
+`<web-administrator-url>/oidc/callback` — a route of the web app — and the card
+posts the returned `code` and `state` to `/extensions/oidcauth/callback`. The
+engine checks the state, exchanges the code with the secret and the PKCE
+verifier, validates the ID token including its nonce, and answers with a
+one-time ticket that the card redeems through the ordinary `/users/_login`, so
+the session, the login audit event, and any second factor are exactly what a
+password sign-in gets.
+
 ## Settings tab
 
+- Client secret and web administrator URL are policy keys. The secret is never
+  echoed: the tab shows a mask, and saving the mask keeps the stored value.
 - Default role and every claim-to-role mapping target are chosen from the
   engine's RBAC roles; a stored name RBAC no longer lists stays selected and is
   marked rather than silently replaced. Linked accounts pick the engine user
@@ -67,8 +84,10 @@ sign-in. See the README's *Limitations* section for what each means in practice.
 
 ## Verification
 
-96 unit tests, and this build walked end to end on OIE 4.6.0 with RBAC 1.1.2
-against Keycloak: the settings tab rendered from the schema, refused a save
+119 unit tests — including the engine-run flow against a local provider that
+checks the secret, the PKCE verifier, the redirect URI, and the nonce — and this
+build walked end to end on OIE 4.6.0 with RBAC 1.1.2 against Keycloak through
+the engine-hosted flow (start, provider, `/oidc/callback`, ticket redemption): the settings tab rendered from the schema, refused a save
 with no default role, verified discovery plus one reachable signing key on
 **Test connection**, persisted, and the engine logged the policy as ACTIVE;
 a first SSO sign-in JIT-provisioned the user with the IdP's email and name and

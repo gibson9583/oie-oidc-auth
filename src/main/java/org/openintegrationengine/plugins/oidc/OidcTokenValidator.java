@@ -51,6 +51,25 @@ public final class OidcTokenValidator {
         return discovery.cachedIssuer();
     }
 
+    /** The discovery client this validator reads, for the sign-in flow's endpoints. */
+    DiscoveryClient discovery() {
+        return discovery;
+    }
+
+    /**
+     * {@link #validate(String)} plus the nonce check that ties a token to the
+     * sign-in attempt that asked for it. A token minted for some other attempt
+     * — or obtained some other way — carries a different nonce or none.
+     */
+    public JWTClaimsSet validate(String token, String expectedNonce) throws Exception {
+        JWTClaimsSet claims = validate(token);
+        String nonce = claims.getStringClaim("nonce");
+        if (expectedNonce == null || expectedNonce.isBlank() || !expectedNonce.equals(nonce)) {
+            throw new BadJWTException("nonce rejected");
+        }
+        return claims;
+    }
+
     public JWTClaimsSet validate(String token) throws Exception {
         DiscoveryClient.Metadata metadata = discovery.get(config);
         SignedJWT parsed = SignedJWT.parse(token);

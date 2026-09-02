@@ -46,6 +46,18 @@ public interface OidcAdminServletInterface extends BaseServletInterface {
     @MirthOperation(name = "getOidcPublicConfiguration", display = "Get public OIDC configuration", auditable = false)
     String publicConfiguration() throws ClientException;
 
+    @POST
+    @Path("/start")
+    @Operation(summary = "Begins a browser sign-in: seals the attempt in a cookie and returns the provider URL to open.")
+    @MirthOperation(name = "startOidcLogin", display = "Start OIDC sign-in", auditable = false)
+    String start(String json) throws ClientException;
+
+    @POST
+    @Path("/callback")
+    @Operation(summary = "Completes a browser sign-in from the code and state the provider returned; answers with a one-time login ticket.")
+    @MirthOperation(name = "completeOidcLogin", display = "Complete OIDC sign-in", auditable = false)
+    String callback(String json) throws ClientException;
+
     @GET
     @Path("/configuration")
     @Operation(summary = "Returns the editable OIDC policy.")

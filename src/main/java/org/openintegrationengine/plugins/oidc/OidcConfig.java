@@ -20,7 +20,9 @@ import java.util.Set;
  * when the policy is enabled — a malformed policy must fail closed at load
  * time, not at the first login.
  */
-public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, String usernameClaim,
+public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, String clientSecret,
+        String webAdministratorUrl, java.util.List<String> scopes, String providerLabel, boolean autoRedirect,
+        String usernameClaim,
         Set<String> allowedAlgorithms, long clockSkewSeconds, long maxTokenAgeSeconds, long jwksCacheTtlSeconds,
         boolean jitEnabled, String emailClaim, String nameClaim, String organizationClaim, String usernamePrefix,
         Map<String, String> linkedAccounts, String rolesClaim, Map<String, String> rolesMap, String defaultRole,
@@ -51,6 +53,25 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         // more actionable of the two, and what this reported before the parses
         // were hoisted.
         String clientId = enabled ? required(p, "client-id") : value(p, "client-id");
+        // The engine runs the browser-facing flow itself, so it needs the client
+        // secret and must know the web administrator's own address: the redirect
+        // URI registered at the provider is built from it, and it is where the
+        // browser is sent back after sign-in — which is why it is validated as
+        // a base URL and never taken from a request header (an open redirect
+        // off a trusted origin is exactly what a spoofed Host would buy).
+        String clientSecret = enabled ? required(p, "client-secret") : value(p, "client-secret");
+        String webAdministratorUrl = (enabled ? required(p, "web-administrator-url") : value(p, "web-administrator-url"))
+                .trim().replaceAll("/+$", "");
+        if (enabled) {
+            requireHttps(webAdministratorUrl, "web-administrator-url");
+            URI base = URI.create(webAdministratorUrl);
+            if (base.getRawQuery() != null || base.getRawFragment() != null || base.getRawUserInfo() != null) {
+                throw new IllegalArgumentException("web-administrator-url must be the address browsers open the web "
+                        + "administrator at — a base URL with no query, fragment, or credentials, e.g. "
+                        + "https://oie-admin.example or https://engine.example:8443/oie-webadmin");
+            }
+        }
+        java.util.List<String> scopes = scopes(value(p, "scopes"));
         // Parsed BEFORE the policy check below so a malformed number still reports
         // itself as one, rather than being masked by whatever validation happens
         // to run first.
@@ -81,6 +102,11 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         return new OidcConfig(enabled,
                 discoveryUrl,
                 clientId,
+                clientSecret,
+                webAdministratorUrl,
+                scopes,
+                value(p, "provider-label").trim().isEmpty() ? "SSO" : value(p, "provider-label").trim(),
+                bool(p, "auto-redirect"),
                 value(p, "username-claim"),
                 csv(value(p, "allowed-algorithms")),
                 clockSkew,
@@ -176,6 +202,22 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
                 default -> { /* TEXT, URL and PAIRS are checked where they are used */ }
             }
         }
+    }
+
+    /**
+     * Space- or comma-separated scopes, {@code openid} always first: without it
+     * the provider returns no ID token at all, and the failure would surface as
+     * "token exchange failed" rather than as the missing scope.
+     */
+    static java.util.List<String> scopes(String value) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        out.add("openid");
+        for (String scope : value.split("[\\s,]+")) {
+            if (!scope.isBlank() && !out.contains(scope.trim())) {
+                out.add(scope.trim());
+            }
+        }
+        return java.util.Collections.unmodifiableList(out);
     }
 
     private static Set<String> csv(String value) {

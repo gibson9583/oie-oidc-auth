@@ -55,6 +55,8 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     /** Why the last apply() rejected the policy, or null if it took. */
     private volatile String lastError;
     private final ReplayCache replays = new ReplayCache();
+    /** Validated tokens waiting to be redeemed through the engine's own login. */
+    private final LoginTicketStore tickets = new LoginTicketStore();
     private final ConcurrentMap<String, Deque<Long>> attempts = new ConcurrentHashMap<>();
     private final ClaimsMapper mapper = new ClaimsMapper();
     private final RbacRoleAssigner roles = new RbacRoleAssigner();
@@ -83,6 +85,19 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     public void stop() {
         replays.clear();
         attempts.clear();
+        tickets.clear();
+    }
+
+    /** The live validator, for the sign-in flow; null while disabled or invalid. */
+    static OidcTokenValidator currentValidator() {
+        OidcAuthorizationPlugin current = instance;
+        return current != null ? current.validator : null;
+    }
+
+    /** The live ticket store, for the sign-in flow's callback; null before init. */
+    static LoginTicketStore currentTickets() {
+        OidcAuthorizationPlugin current = instance;
+        return current != null ? current.tickets : null;
     }
 
     @Override
@@ -226,6 +241,18 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             throttle(username);
 
             String token = password.substring(5);
+            // A ticket is what the engine's own callback hands the web client:
+            // the token behind it already passed validation there, and passes it
+            // again here, so redeeming through this path costs nothing it would
+            // not have cost the provider's token directly — and gains the whole
+            // login pipeline this method sits inside (session, audit, MFA).
+            if (token.startsWith("ticket:")) {
+                LoginTicketStore.Ticket ticket = tickets.redeem(token.substring("ticket:".length()), System.currentTimeMillis());
+                if (ticket == null) {
+                    return fail("SSO sign-in expired or was already used. Try again.");
+                }
+                token = ticket.token();
+            }
             JWTClaimsSet claims = validator.validate(token);
             // Only AFTER the token proves valid: recording an unverified string
             // would let anyone fill the cache with garbage, and the capacity

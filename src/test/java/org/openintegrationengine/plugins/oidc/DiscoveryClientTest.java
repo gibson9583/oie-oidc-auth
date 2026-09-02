@@ -80,6 +80,8 @@ class DiscoveryClientTest {
     private static OidcConfig config(long ttlSeconds) {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
+        p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        p.setProperty("web-administrator-url", "https://admin.test");
         p.setProperty("roles.default", "Viewer");   // required whenever RBAC is on the classpath
         p.setProperty("discovery-url", base + "/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
@@ -170,6 +172,8 @@ class DiscoveryClientTest {
         jwksBody = "{\"keys\":[{\"kty\":\"RSA\",\"use\":\"sig\",\"kid\":\"a\",\"alg\":\"PS512\"}]}";
         Properties narrow = new Properties();
         narrow.setProperty("enabled", "true");
+        narrow.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
+        narrow.setProperty("web-administrator-url", "https://admin.test");
         narrow.setProperty("roles.default", "Viewer");
         narrow.setProperty("discovery-url", base + "/.well-known/openid-configuration");
         narrow.setProperty("client-id", "client");

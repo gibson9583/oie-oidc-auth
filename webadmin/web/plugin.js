@@ -185,7 +185,17 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
     }
   ), f.label, pinnedNote(f.key)))), (() => {
     const suggest = SUGGESTIONS(form);
-    const renderField = (f) => /* @__PURE__ */ React.createElement("div", { className: "field", key: f.key }, /* @__PURE__ */ React.createElement("label", null, f.label, pinnedNote(f.key)), f.kind === "boolean" || f.kind === "enum" ? /* @__PURE__ */ React.createElement("select", { value: form[f.key] || "", disabled: locked(f.key), onChange: (e) => patch(f.key, e.target.value) }, (f.kind === "boolean" ? ["true", "false"] : f.choices || []).map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, choiceLabel(f.key, c)))) : f.key === "roles.default" && roleNames ? /* @__PURE__ */ React.createElement(ChoiceSelect, { value: form[f.key] || "", options: roleNames, placeholder: "\u2014 no default role \u2014", unknownLabel: "(not an existing role)", disabled: locked(f.key), onChange: (v) => patch(f.key, v) }) : /* @__PURE__ */ React.createElement(
+    const renderField = (f) => /* @__PURE__ */ React.createElement("div", { className: "field", key: f.key }, /* @__PURE__ */ React.createElement("label", null, f.label, pinnedNote(f.key)), f.kind === "boolean" || f.kind === "enum" ? /* @__PURE__ */ React.createElement("select", { value: form[f.key] || "", disabled: locked(f.key), onChange: (e) => patch(f.key, e.target.value) }, (f.kind === "boolean" ? ["true", "false"] : f.choices || []).map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, choiceLabel(f.key, c)))) : f.key === "roles.default" && roleNames ? /* @__PURE__ */ React.createElement(ChoiceSelect, { value: form[f.key] || "", options: roleNames, placeholder: "\u2014 no default role \u2014", unknownLabel: "(not an existing role)", disabled: locked(f.key), onChange: (v) => patch(f.key, v) }) : f.kind === "secret" ? /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "password",
+        autoComplete: "new-password",
+        value: form[f.key] || "",
+        placeholder: "not set",
+        disabled: locked(f.key),
+        onChange: (e) => patch(f.key, e.target.value)
+      }
+    ) : /* @__PURE__ */ React.createElement(
       "input",
       {
         type: f.kind === "number" ? "number" : f.kind === "url" ? "url" : "text",
