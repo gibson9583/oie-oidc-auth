@@ -37,7 +37,6 @@ var SUGGESTIONS = (form) => ({
   "jit.organization-claim": ["organization", "org", "company"],
   "roles.claim": ["groups", "roles", "cognito:groups", "realm_access.roles", `resource_access.${String(form["client-id"] || "").trim() || "<client-id>"}.roles`]
 });
-var ADVANCED = /* @__PURE__ */ new Set(["jit.email-claim", "jit.name-claim", "jit.organization-claim", "allowed-algorithms", "clock-skew-seconds", "max-token-age-seconds", "jwks-cache-ttl-seconds"]);
 function PairEditor({ label, value, onChange, onProblem, disabled, keyPlaceholder, keyOptions, keyUnknownLabel, valuePlaceholder, valueOptions, valueUnknownLabel, valuePrefix, valueCheck, addLabel }) {
   const [rows, setRows] = React.useState(() => parsePairs(value));
   const last = React.useRef(value);
@@ -198,7 +197,7 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
     ), suggest[f.key] ? /* @__PURE__ */ React.createElement("datalist", { id: `oidc-suggest-${f.key}` }, suggest[f.key].map((s) => /* @__PURE__ */ React.createElement("option", { key: s, value: s }))) : null);
     const issuerKnown = String(form._issuer || "").trim();
     const subjectCheck = (v) => /#\s*$/.test(String(v || "")) ? `Paste the subject after "#" \u2014 the identifier your provider shows for this user (in Keycloak, the user's ID).` : null;
-    return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, schema.filter((f) => f.key !== "enabled" && f.kind !== "pairs" && !ADVANCED.has(f.key)).map(renderField)), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, schema.filter((f) => f.kind === "pairs").map((f) => /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4" }, schema.filter((f) => f.key !== "enabled" && f.kind !== "pairs").map(renderField)), /* @__PURE__ */ React.createElement("div", { className: "mt-4", style: { maxWidth: 560 } }, schema.filter((f) => f.kind === "pairs").map((f) => /* @__PURE__ */ React.createElement(
       PairEditor,
       {
         key: f.key,
@@ -217,7 +216,7 @@ function OidcPanel({ setTasks, setSave, markDirty, markClean }) {
         onChange: (v) => patch(f.key, v),
         onProblem: noteProblem(f.key)
       }
-    ))), /* @__PURE__ */ React.createElement("details", { className: "mt-4" }, /* @__PURE__ */ React.createElement("summary", { style: { cursor: "pointer", fontWeight: 600 } }, "Advanced"), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-2 gap-4 mt-2" }, schema.filter((f) => ADVANCED.has(f.key)).map(renderField))));
+    ))));
   })());
 }
 async function register(host) {

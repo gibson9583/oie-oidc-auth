@@ -62,9 +62,6 @@ const SUGGESTIONS=(form)=>({
  'jit.name-claim':['name','given_name','family_name','display_name'],
  'jit.organization-claim':['organization','org','company'],
  'roles.claim':['groups','roles','cognito:groups','realm_access.roles',`resource_access.${String(form['client-id']||'').trim()||'<client-id>'}.roles`]});
-// Rarely changed once set, and never the reason SSO is not working; folded
-// away so the tab leads with what decides identity and access.
-const ADVANCED=new Set(['jit.email-claim','jit.name-claim','jit.organization-claim','allowed-algorithms','clock-skew-seconds','max-token-age-seconds','jwks-cache-ttl-seconds']);
 function PairEditor({label,value,onChange,onProblem,disabled,keyPlaceholder,keyOptions,keyUnknownLabel,valuePlaceholder,valueOptions,valueUnknownLabel,valuePrefix,valueCheck,addLabel}){
  const [rows,setRows]=React.useState(()=>parsePairs(value));
  const last=React.useRef(value);
@@ -221,7 +218,7 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
   const issuerKnown=String(form._issuer||'').trim();
   const subjectCheck=(v)=>/#\s*$/.test(String(v||''))?'Paste the subject after "#" — the identifier your provider shows for this user (in Keycloak, the user\'s ID).':null;
   return <>
-   <div className="grid grid-cols-2 gap-4">{schema.filter(f=>f.key!=='enabled'&&f.kind!=='pairs'&&!ADVANCED.has(f.key)).map(renderField)}</div>
+   <div className="grid grid-cols-2 gap-4">{schema.filter(f=>f.key!=='enabled'&&f.kind!=='pairs').map(renderField)}</div>
    <div className="mt-4" style={{maxWidth:560}}>{schema.filter(f=>f.kind==='pairs').map(f=>
     <PairEditor key={f.key} label={f.label+(pinned.includes(f.key)?' — pinned':'')} value={form[f.key]||''}
      disabled={locked(f.key)} addLabel={f.key==='roles.map'?'Add mapping':'Link account'}
@@ -233,9 +230,6 @@ function OidcPanel({setTasks,setSave,markDirty,markClean}){const [form,setForm]=
      valueCheck={f.key==='linked-accounts'?subjectCheck:undefined}
      onChange={v=>patch(f.key,v)} onProblem={noteProblem(f.key)}/>)}
    </div>
-   <details className="mt-4"><summary style={{cursor:'pointer',fontWeight:600}}>Advanced</summary>
-    <div className="grid grid-cols-2 gap-4 mt-2">{schema.filter(f=>ADVANCED.has(f.key)).map(renderField)}</div>
-   </details>
   </>;})()}
  </div>}
 export async function register(host){
