@@ -2,6 +2,8 @@
 
 Engine-side authorization extension for the OIE web administrator's native OpenID Connect login. It validates signed ID tokens itself, creates real named engine users when configured, permanently binds each account to `issuer#subject`, and optionally maps provider groups to the RBAC extension. Local password login is untouched.
 
+**Documentation:** the [wiki](https://github.com/gibson9583/oie-oidc-auth/wiki) has installation and configuration walkthroughs with screenshots, provider guides for Keycloak, Microsoft Entra ID, Okta, and AWS Cognito, and a troubleshooting page. This README is the reference.
+
 ## Install and configure
 
 Build with Java 17 and an OIE 4.6.0 installation:
