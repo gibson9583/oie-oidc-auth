@@ -11,16 +11,20 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.util.Date;
 import java.util.Properties;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import com.mirth.connect.model.LoginStatus;
+import com.nimbusds.jwt.JWTClaimsSet;
 import com.mirth.connect.model.LoginStatus.Status;
 
 /**
@@ -109,5 +113,86 @@ class OidcAuthorizationPluginTest {
             assertNotNull(status);
             assertEquals(Status.FAIL, status.getStatus());
         }
+    }
+
+    /**
+     * A plugin whose validator ACCEPTS, so execution reaches the replay cache.
+     * Provisioning past that needs the engine's UserController singleton, which
+     * is not available here — but the replay check runs first, which is exactly
+     * the part under test.
+     */
+    private static OidcAuthorizationPlugin accepting(OidcTokenValidator validator) throws Exception {
+        Properties p = new Properties();
+        p.setProperty("enabled", "true");
+        p.setProperty("roles.default", "Viewer");
+        p.setProperty("discovery-url", "https://issuer.example/.well-known/openid-configuration");
+        p.setProperty("client-id", "client");
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(p), validator);
+        return plugin;
+    }
+
+    private static JWTClaimsSet validClaims() {
+        Date now = new Date();
+        return new JWTClaimsSet.Builder().issuer("https://issuer.example").audience("client")
+                .subject("subject-1").claim("preferred_username", "jdoe")
+                .issueTime(now).expirationTime(new Date(now.getTime() + 300_000)).build();
+    }
+
+    /**
+     * The replay cache is the engine's ONLY defence against a re-presented ID
+     * token — the nonce is checked at the web tier, not here — and nothing
+     * proved a second use was refused. The two outcomes are deliberately
+     * distinguishable: a reuse says so, everything else is the generic rejection.
+     */
+    @Test
+    void refusesASecondUseOfTheSameToken() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        OidcAuthorizationPlugin plugin = accepting(validator);
+
+        // First use records the token, then fails downstream for want of a
+        // UserController — the recording is what matters here.
+        LoginStatus first = plugin.authorizeUser("jdoe", "oidc:token-aaa");
+        assertEquals(Status.FAIL, first.getStatus());
+        assertEquals("SSO sign-in was rejected.", first.getMessage());
+
+        LoginStatus replayed = plugin.authorizeUser("jdoe", "oidc:token-aaa");
+        assertEquals(Status.FAIL, replayed.getStatus());
+        assertEquals("SSO assertion was already used.", replayed.getMessage(),
+                "a re-presented token must be refused as a replay, not as a generic failure");
+
+        // A DIFFERENT token is unaffected — the cache keys on the token, not the
+        // user, so one replay must not lock somebody out.
+        LoginStatus other = plugin.authorizeUser("jdoe", "oidc:token-bbb");
+        assertEquals("SSO sign-in was rejected.", other.getMessage());
+    }
+
+    /**
+     * The throttle exists because this path bypasses the engine's per-user
+     * strike lockout. Enforcement is invisible in the response — every failure
+     * returns the same generic message — so assert it where it shows: once the
+     * limit is hit, the token is never even handed to the validator.
+     */
+    @Test
+    void stopsCallingTheValidatorOnceAHintIsThrottled() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenThrow(new SecurityException("bad token"));
+        OidcAuthorizationPlugin plugin = accepting(validator);
+
+        for (int i = 0; i < 20; i++) {
+            assertEquals(Status.FAIL, plugin.authorizeUser("guessing", "oidc:bad-" + i).getStatus());
+        }
+        verify(validator, times(20)).validate(any());
+
+        for (int i = 0; i < 5; i++) {
+            assertEquals(Status.FAIL, plugin.authorizeUser("guessing", "oidc:bad-extra-" + i).getStatus());
+        }
+        verify(validator, times(20)).validate(any());   // still 20: the throttle short-circuits
+
+        // The limit is per hint, so a different username is unaffected — a
+        // runaway against one name must not deny service to everyone else.
+        assertEquals(Status.FAIL, plugin.authorizeUser("someone-else", "oidc:bad-x").getStatus());
+        verify(validator, times(21)).validate(any());
     }
 }

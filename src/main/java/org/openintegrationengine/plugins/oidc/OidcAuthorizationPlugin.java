@@ -220,8 +220,14 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             roles.assign(provisioned.user().getId(), provisioned.created(), identity, config);
             log.info("OIDC login accepted for user '{}' subject hash {}", identity.username(), hash(identity.subject()));
             return new LoginStatus(Status.SUCCESS, null, identity.username());
-        } catch (Exception e) {
-            log.warn("OIDC login rejected for user hint '{}': {}", username, e.getMessage());
+        } catch (Throwable e) {
+            // Throwable, not Exception. The contract above is that an oidc:
+            // assertion NEVER falls out of this method — it fails closed, with a
+            // status. An Error does not respect `catch (Exception)`: a
+            // LinkageError from a half-installed dependency, raised while
+            // resolving the user controller, would propagate into the engine's
+            // login path instead of being refused here. Fail closed on anything.
+            log.warn("OIDC login rejected for user hint '{}': {}", username, e.toString());
             return fail("SSO sign-in was rejected.");
         }
     }

@@ -113,12 +113,27 @@ public final class OidcConfigLoader {
     static java.util.Set<String> pinned() {
         java.util.Set<String> keys = new java.util.LinkedHashSet<>();
         for (String key : DEFAULTS.keySet()) {
-            if (System.getProperty("org.openintegrationengine.oidc." + key) != null
-                    || System.getenv("OIE_OIDC_" + key.toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_')) != null) {
+            if (System.getProperty(systemPropertyName(key)) != null || System.getenv(envVarName(key)) != null) {
                 keys.add(key);
             }
         }
         return keys;
+    }
+
+    /** The system property that pins {@code key}. */
+    static String systemPropertyName(String key) {
+        return "org.openintegrationengine.oidc." + key;
+    }
+
+    /**
+     * The environment variable that pins {@code key}: uppercased, with dots and
+     * hyphens folded to underscores. Extracted so the rule is verifiable —
+     * environment variables cannot be set in-process, so a test can only check
+     * the NAME this computes, and a mangling that collapsed two policy keys onto
+     * one variable would otherwise let one silently shadow the other.
+     */
+    static String envVarName(String key) {
+        return "OIE_OIDC_" + key.toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_');
     }
 
     /** The stored policy plus operator pins — what the engine actually enforces. */
@@ -128,8 +143,8 @@ public final class OidcConfigLoader {
             p.putAll(stored);
         }
         for (String key : DEFAULTS.keySet()) {
-            String sys = System.getProperty("org.openintegrationengine.oidc." + key);
-            String env = System.getenv("OIE_OIDC_" + key.toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_'));
+            String sys = System.getProperty(systemPropertyName(key));
+            String env = System.getenv(envVarName(key));
             if (sys != null) {
                 p.setProperty(key, sys);
             }

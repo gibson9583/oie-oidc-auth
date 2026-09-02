@@ -8,6 +8,7 @@ package org.openintegrationengine.plugins.oidc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -87,5 +88,56 @@ class OidcConfigLoaderTest {
 
         OidcConfigLoader.withOverrides(stored);
         assertEquals("from-store", stored.getProperty("client-id"));
+    }
+
+    /**
+     * The environment half of the override mechanism. Environment variables
+     * cannot be set in-process, so what is testable is the NAME each policy key
+     * maps to — and that is the part most likely to be wrong, since it folds two
+     * different separators into one.
+     */
+    @Test
+    void everyPolicyKeyMapsToItsDocumentedEnvironmentVariable() {
+        assertEquals("OIE_OIDC_CLIENT_ID", OidcConfigLoader.envVarName("client-id"));
+        assertEquals("OIE_OIDC_JIT_ENABLED", OidcConfigLoader.envVarName("jit.enabled"));
+        assertEquals("OIE_OIDC_ROLES_DEFAULT", OidcConfigLoader.envVarName("roles.default"));
+        assertEquals("OIE_OIDC_JWKS_CACHE_TTL_SECONDS", OidcConfigLoader.envVarName("jwks-cache-ttl-seconds"));
+        assertEquals("OIE_OIDC_JIT_ORGANIZATION_CLAIM", OidcConfigLoader.envVarName("jit.organization-claim"));
+        assertEquals("org.openintegrationengine.oidc.roles.map", OidcConfigLoader.systemPropertyName("roles.map"));
+    }
+
+    /**
+     * Two keys must never fold onto the same variable — one would silently
+     * shadow the other, and the operator would have no way to tell which.
+     */
+    @Test
+    void noTwoPolicyKeysShareAnEnvironmentVariable() {
+        java.util.Map<String, String> byVar = new java.util.HashMap<>();
+        for (String key : OidcConfigLoader.DEFAULTS.keySet()) {
+            String previous = byVar.put(OidcConfigLoader.envVarName(key), key);
+            assertNull(previous, "'" + key + "' and '" + previous + "' both map to "
+                    + OidcConfigLoader.envVarName(key));
+        }
+        assertEquals(OidcConfigLoader.DEFAULTS.size(), byVar.size());
+    }
+
+    /**
+     * A pin is reported from the PRESENCE of an override, not a value
+     * difference — a pin whose value happens to match what is stored is still a
+     * pin, and an edit to it still never takes effect. The settings tab shows
+     * these read-only and the save excludes them, so a false negative here means
+     * an editable field that silently reverts.
+     */
+    @Test
+    void reportsPinnedKeysEvenWhenTheValueMatchesTheStoredOne() {
+        assertTrue(OidcConfigLoader.pinned().isEmpty(), "no pins set in this test");
+
+        System.setProperty(PIN, "identical");
+        assertTrue(OidcConfigLoader.pinned().contains("client-id"));
+
+        Properties stored = new Properties();
+        stored.setProperty("client-id", "identical");   // same value as the pin
+        assertTrue(OidcConfigLoader.pinned().contains("client-id"),
+                "a pin is a pin even when it changes nothing");
     }
 }

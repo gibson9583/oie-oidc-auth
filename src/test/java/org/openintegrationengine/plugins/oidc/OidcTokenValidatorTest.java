@@ -44,6 +44,8 @@ class OidcTokenValidatorTest {
     private static String issuer;
     private static RSAKey signingKey;
     private static RSAKey rogueKey;
+    /** What /jwks currently publishes; swapped by the rotation test. */
+    private static volatile JWKSet served;
     private static final AtomicInteger jwksFetches = new AtomicInteger();
 
     @BeforeAll
@@ -62,9 +64,13 @@ class OidcTokenValidatorTest {
                 out.write(body);
             }
         });
+        served = new JWKSet(signingKey.toPublicJWK());
         server.createContext("/jwks", exchange -> {
             jwksFetches.incrementAndGet();
-            byte[] body = new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8);
+            // Read from a mutable field so a test can ROTATE the published key
+            // set mid-run, which is the only way to exercise the unknown-kid
+            // refetch the validator relies on.
+            byte[] body = served.toString().getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream out = exchange.getResponseBody()) {
@@ -179,5 +185,49 @@ class OidcTokenValidatorTest {
         String payload = java.util.Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(claims().build().toString().getBytes(StandardCharsets.UTF_8));
         assertThrows(Exception.class, () -> validator().validate(header + "." + payload + "."));
+    }
+
+    /**
+     * Key rotation, the way it actually happens: the IdP publishes a new key
+     * under a NEW kid and starts signing with it while the validator still holds
+     * a cached key set that predates it. Nimbus's unknown-kid refetch is what
+     * keeps logins working across that window — asserted in comments up to now,
+     * but never exercised, because the suite served one static key for its whole
+     * lifetime. A validator that could not refetch would reject every token
+     * issued after any rotation until the engine restarted.
+     */
+    @Test
+    void acceptsATokenSignedByAKeyPublishedAfterTheCacheWasPopulated() throws Exception {
+        OidcTokenValidator validator = validator();
+        // Populate the cache against the original key.
+        validator.validate(sign(claims().build(), signingKey));
+        int fetchesBeforeRotation = jwksFetches.get();
+
+        RSAKey rotated = new RSAKeyGenerator(2048).keyID("k2-rotated").generate();
+        served = new JWKSet(java.util.List.of(signingKey.toPublicJWK(), rotated.toPublicJWK()));
+
+        JWTClaimsSet parsed = validator.validate(sign(claims().build(), rotated));
+        assertEquals("subject-1", parsed.getSubject());
+        assertTrue(jwksFetches.get() > fetchesBeforeRotation,
+                "an unknown kid must trigger a refetch rather than failing against the cached set");
+    }
+
+    /**
+     * The retired half of a rotation. Once the IdP stops publishing a key,
+     * tokens it signed must stop validating — otherwise a leaked key stays
+     * usable for as long as the cache does, which is the reason to rotate.
+     */
+    @Test
+    void rejectsATokenSignedByAKeyTheIdpNoLongerPublishes() throws Exception {
+        RSAKey retiring = new RSAKeyGenerator(2048).keyID("k3-retiring").generate();
+        served = new JWKSet(java.util.List.of(signingKey.toPublicJWK(), retiring.toPublicJWK()));
+        OidcTokenValidator validator = validator();
+        validator.validate(sign(claims().build(), retiring));   // still published: fine
+
+        served = new JWKSet(signingKey.toPublicJWK());           // retired
+        OidcTokenValidator afterRetirement = validator();
+        assertThrows(Exception.class, () -> afterRetirement.validate(sign(claims().build(), retiring)));
+
+        served = new JWKSet(signingKey.toPublicJWK());           // leave the fixture as found
     }
 }
