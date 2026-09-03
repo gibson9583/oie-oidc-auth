@@ -215,20 +215,19 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             config = OidcConfig.from(cipher().openAll(effective, OidcConfigLoader.pinned()));
             validator = config.enabled() ? new OidcTokenValidator(config, new DiscoveryClient()) : null;
             // One line that answers "why is there no SSO button?" without a
-            // debugger. That question has several causes — extension present but
-            // policy off, policy rejected, emergency switch thrown, JIT on
-            // without RBAC — and until now every one of them produced the same
-            // silence, so the only way to tell them apart was to know about an
-            // undocumented endpoint. Logged at startup and on every save.
+            // debugger, written at startup and on every save. The two healthy
+            // states are DEBUG: at the engine's default level the log stays
+            // quiet unless something needs an operator — the emergency switch,
+            // a rejected policy, JIT without a permission model.
             if (killSwitchActive()) {
                 log.warn("OIDC authentication is SWITCHED OFF by OIE_OIDC_DISABLED (or the "
                         + "org.openintegrationengine.oidc.disabled system property). The stored policy is ignored and "
                         + "the web administrator is told SSO is unavailable.");
             } else if (!config.enabled()) {
-                log.info("OIDC authentication is disabled (policy key 'enabled' is false). The web administrator will "
+                log.debug("OIDC authentication is disabled (policy key 'enabled' is false). The web administrator will "
                         + "not offer an SSO button.");
             } else {
-                log.info("OIDC authentication is ACTIVE for {} (client {}). JIT provisioning {}; role sync {}.",
+                log.debug("OIDC authentication is ACTIVE for {} (client {}). JIT provisioning {}; role sync {}.",
                         config.discoveryUrl(), config.clientId(),
                         config.jitEnabled() ? "ON" : "off", config.rolesSync());
                 if (config.jitEnabled() && !RbacRoleAssigner.isInstalled()) {

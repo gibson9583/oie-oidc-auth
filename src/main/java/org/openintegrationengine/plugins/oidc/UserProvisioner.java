@@ -80,7 +80,7 @@ public final class UserProvisioner {
                 boundElsewhere.setUsername(identity.username());
                 users.updateUser(boundElsewhere);
                 LogManager.getLogger(UserProvisioner.class)
-                        .info("OIDC renamed user '{}' to '{}' (same subject binding)", previous, identity.username());
+                        .debug("OIDC renamed user '{}' to '{}' (same subject binding)", previous, identity.username());
                 user = users.getUser(null, identity.username());
                 if (user == null) {
                     throw new SecurityException("Could not rename the bound account");

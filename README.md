@@ -26,13 +26,14 @@ The build writes `target/oidcauth-1.0.1.zip`. Each release on GitHub also carrie
 
 1. Extract the zip into the engine's extensions directory.
 2. Restart the engine.
-3. Find one line in the engine log that starts with `OIDC authentication is`. The line reports one of four states:
-   - `ACTIVE for <discovery-url>`
-   - `disabled (policy key 'enabled' is false)`
-   - `SWITCHED OFF by OIE_OIDC_DISABLED`
-   - `not configured: <reason>`
+3. Open **Settings → OIDC Authentication** in the web administrator. The tab is present when the extension loaded. If the extension did not load, the engine has no OIDC endpoints, no `manageOIDC` permission, and no settings tab.
 
-If the log has no such line, the extension did not load. The engine then has no OIDC endpoints, no `manageOIDC` permission, and no settings tab. The engine writes this line at startup and after each save.
+The extension writes nothing to the engine log at the default level while it is healthy. It logs a WARN line when the kill switch is set, when the stored policy is rejected, and when JIT provisioning is on without the RBAC extension. To see its state in the log, set the logger `org.openintegrationengine.plugins.oidc` to DEBUG. The engine then writes one line that starts with `OIDC authentication is` at startup and after each save. The line reports one of four states:
+
+- `ACTIVE for <discovery-url>`
+- `disabled (policy key 'enabled' is false)`
+- `SWITCHED OFF by OIE_OIDC_DISABLED`
+- `not configured: <reason>`
 
 ## Permissions
 

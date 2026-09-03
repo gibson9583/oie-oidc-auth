@@ -13,6 +13,15 @@ Security release.
   before the stored value is judged, so it can rescue an engine whose stored
   secret no longer opens.
 
+## Changed
+
+- The engine log is quiet at the default level. The state line written at
+  startup and after each save (`OIDC authentication is ACTIVE …` or
+  `… disabled …`) and the account-rename line are DEBUG. The kill switch, a
+  rejected policy, JIT provisioning without RBAC, and refused sign-ins stay
+  WARN. Set the logger `org.openintegrationengine.plugins.oidc` to DEBUG to
+  see the state line.
+
 ## Upgrading from 1.0.0
 
 Every 1.0.0 install stores the secret in the clear, and this release refuses
