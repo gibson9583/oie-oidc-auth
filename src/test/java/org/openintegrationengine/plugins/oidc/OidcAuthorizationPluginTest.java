@@ -106,112 +106,127 @@ class OidcAuthorizationPluginTest {
         assertEquals(Status.FAIL, status.getStatus());
     }
 
-    /* ---- where the policy lives ------------------------------------------ */
+    /* ---- the secret at rest ----------------------------------------------- */
 
-    /** An in-memory store, plus a record of what happened to the plugin slot. */
-    private static final class MemoryStore implements PolicyStore {
-        Properties saved = new Properties();
-        int slotCleared;
-        RuntimeException failure;
+    /** A reversible stand-in for the engine's encryptor, with a switch to break decryption. */
+    private static final class FakeCipher implements SecretCipher {
+        boolean broken;
 
         @Override
-        public Properties load() {
-            if (failure != null) {
-                throw failure;
-            }
-            Properties copy = new Properties();
-            copy.putAll(saved);
-            return copy;
+        public String encrypt(String plain) {
+            return new StringBuilder(plain).reverse().toString();
         }
+
+        @Override
+        public String decrypt(String ciphertext) throws Exception {
+            if (broken) {
+                throw new Exception("wrong key");
+            }
+            return new StringBuilder(ciphertext).reverse().toString();
+        }
+    }
+
+    /** The engine's slot, as a plugin sees it: whatever was last saved. */
+    private static final class Slot implements OidcAuthorizationPlugin.PolicySlot {
+        Properties saved;
 
         @Override
         public void save(Properties policy) {
             saved = new Properties();
             saved.putAll(policy);
         }
+    }
 
-        @Override
-        public void clearPluginSlot() {
-            slotCleared++;
+    private static Properties sealedPolicy(FakeCipher cipher) throws Exception {
+        Properties p = policy();
+        p.setProperty("client-secret", cipher.seal("test-client-secret"));
+        return p;
+    }
+
+    @Test
+    void theSlotIsSeededWithEveryDefault() {
+        // The engine's native lifecycle: defaults seeded on install, merged on
+        // upgrade, pushed back at startup. Exports and restores carry the slot.
+        assertEquals(PolicySchema.KEYS.size(), new OidcAuthorizationPlugin().getDefaultProperties().size());
+    }
+
+    @Test
+    void aSavedSecretIsStoredSealedAndAppliedInTheClear() throws Exception {
+        FakeCipher cipher = new FakeCipher();
+        Slot slot = new Slot();
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> cipher, slot);
+        plugin.init(OidcConfigLoader.defaults());
+
+        OidcConfigLoader.saveAndApply(policy());   // the tab sends the secret in the clear
+
+        String stored = slot.saved.getProperty("client-secret");
+        assertEquals(true, SecretCipher.sealed(stored), stored);
+        assertEquals(false, stored.contains("test-client-secret"), "the slot never holds the plain secret");
+        assertEquals("test-client-secret", OidcAuthorizationPlugin.currentConfig().clientSecret(), "the flow gets the plain one");
+        assertEquals(stored, OidcAuthorizationPlugin.currentProperties().getProperty("client-secret"), "the GET sees the sealed one, and masks it");
+        assertEquals("client", slot.saved.getProperty("client-id"), "everything else is stored as is");
+    }
+
+    @Test
+    void aSealedSecretOpensAtStartupAndOnAnEngineSlotWrite() throws Exception {
+        FakeCipher cipher = new FakeCipher();
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> cipher, new Slot());
+
+        plugin.init(sealedPolicy(cipher));
+        assertEquals("test-client-secret", OidcAuthorizationPlugin.currentConfig().clientSecret());
+
+        Properties rewritten = sealedPolicy(cipher);
+        rewritten.setProperty("provider-label", "Renamed");
+        plugin.update(rewritten);   // a configuration restore, or the generic properties endpoint
+        assertEquals("Renamed", OidcAuthorizationPlugin.currentConfig().providerLabel());
+    }
+
+    @Test
+    void aSecretWrittenInTheClearIsRefusedNotUsed() {
+        // A raw write to the slot, or a pre-encryption build's value: fail
+        // closed, and say what to do.
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> new FakeCipher(), new Slot());
+
+        plugin.init(policy());   // client-secret in the clear
+
+        assertNull(OidcAuthorizationPlugin.currentConfig());
+        assertEquals(true, String.valueOf(OidcAuthorizationPlugin.currentError()).contains("stored unencrypted"),
+                OidcAuthorizationPlugin.currentError());
+    }
+
+    @Test
+    void aSecretThatDoesNotDecryptFailsClosed() throws Exception {
+        FakeCipher cipher = new FakeCipher();
+        Properties sealed = sealedPolicy(cipher);
+        cipher.broken = true;   // another engine's key, or a tampered value
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> cipher, new Slot());
+
+        plugin.init(sealed);
+
+        assertNull(OidcAuthorizationPlugin.currentConfig());
+        assertEquals(true, String.valueOf(OidcAuthorizationPlugin.currentError()).contains("could not be decrypted"),
+                OidcAuthorizationPlugin.currentError());
+    }
+
+    @Test
+    void anOperatorPinSuppliesTheSecretInTheClearOverTheStoredOne() throws Exception {
+        FakeCipher cipher = new FakeCipher();
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> cipher, new Slot());
+        System.setProperty("org.openintegrationengine.oidc.client-secret", "pinned-secret");
+        try {
+            plugin.init(sealedPolicy(cipher));
+            assertEquals("pinned-secret", OidcAuthorizationPlugin.currentConfig().clientSecret());
+        } finally {
+            System.clearProperty("org.openintegrationengine.oidc.client-secret");
         }
     }
 
     @Test
-    void nothingIsSeededIntoTheEnginesPluginSlot() {
-        // The slot is dumped raw by the Extensions page and carried by
-        // configuration exports; the policy must never be there.
-        assertEquals(true, new OidcAuthorizationPlugin().getDefaultProperties().isEmpty());
-    }
-
-    @Test
-    void thePolicyIsReadFromTheExtensionsOwnStoreAtStartup() {
-        MemoryStore store = new MemoryStore();
-        store.saved.putAll(policy());
-        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
-
-        plugin.init(new Properties());   // the engine's slot: empty, as it should be
-
-        assertEquals("client", OidcAuthorizationPlugin.currentProperties().getProperty("client-id"));
-        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
-        assertEquals(0, store.slotCleared, "nothing in the slot, nothing to clear");
-    }
-
-    @Test
-    void aPolicyLeftInThePluginSlotIsMovedOnceAndTheSlotEmptied() {
-        MemoryStore store = new MemoryStore();
-        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
-
-        plugin.init(policy());   // what a pre-1.0 build had saved into the slot
-
-        assertEquals("client", store.saved.getProperty("client-id"), "moved into the store");
-        assertEquals(1, store.slotCleared, "and out of the slot");
-        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
-    }
-
-    @Test
-    void aStaleSlotNeverOverridesTheStoreButIsStillEmptied() {
-        MemoryStore store = new MemoryStore();
-        store.saved.putAll(policy());
-        Properties stale = policy();
-        stale.setProperty("client-id", "stale-slot-copy");
-        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
-
-        plugin.init(stale);
-
-        assertEquals("client", OidcAuthorizationPlugin.currentProperties().getProperty("client-id"));
-        assertEquals("client", store.saved.getProperty("client-id"), "the store is authoritative");
-        assertEquals(1, store.slotCleared);
-    }
-
-    @Test
-    void aSaveWritesTheStoreAndAppliesWithoutReadingItBack() throws Exception {
-        MemoryStore store = new MemoryStore();
-        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
-        plugin.init(new Properties());
-
-        Properties saved = policy();
-        OidcConfigLoader.saveAndApply(saved);
-
-        assertEquals("client", store.saved.getProperty("client-id"));
-        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
-        // A write to the engine's slot — the generic endpoint, a config import —
-        // is not a policy change: the store is what counts.
-        Properties slotWrite = policy();
-        slotWrite.setProperty("enabled", "false");
-        plugin.update(slotWrite);
-        assertEquals(true, OidcAuthorizationPlugin.currentConfig().enabled());
-    }
-
-    @Test
-    void anUnreadableStoreLoadsDisabledAndSaysWhy() {
-        MemoryStore store = new MemoryStore();
-        store.failure = new IllegalStateException("database away");
-        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> store);
-
-        plugin.init(new Properties());   // must not throw into engine startup
-
+    void anEmptySecretNeedsNoSealAndADisabledPolicyStillLoads() {
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> new FakeCipher(), new Slot());
+        plugin.init(OidcConfigLoader.defaults());   // fresh install: enabled=false, secret ""
         assertEquals(false, OidcAuthorizationPlugin.currentConfig().enabled());
-        assertEquals(true, String.valueOf(OidcAuthorizationPlugin.currentError()).contains("database away"));
+        assertNull(OidcAuthorizationPlugin.currentError());
     }
 
     /* ---- only a ticket is a credential --------------------------------- */

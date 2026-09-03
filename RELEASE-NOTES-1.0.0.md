@@ -105,13 +105,14 @@ password sign-in gets.
   is capped at 2 KB so the sealed cookie stays deliverable; **Test connection**
   is audited (without its body); discovery refreshes no longer hold every
   concurrent sign-in behind one fetch.
-- The policy is stored in the extension's own configuration group, not the
-  engine's per-plugin properties slot. That slot is dumped raw by the
-  Extensions page's **Properties** action and carried by server-configuration
-  exports, with no notion of which keys are secrets — the client secret was
-  readable there in the clear. The slot now stays empty (a policy an earlier
-  build saved there is moved on first start), so the settings tab is the only
-  place the policy exists.
+- The client secret is encrypted with the engine's key before it is stored.
+  The Extensions page's raw **Properties** view and server-configuration
+  exports show ciphertext; a secret stored in the clear, or one another
+  engine's key cannot decrypt, is refused at load until it is entered again.
+  The engine's generic plugin-properties endpoints carry no permission of
+  their own; the role-based-access-control extension gates them by
+  `manageExtensions` from its next release, and refuses names that are not
+  installed extensions.
 - Web administrator: sign-out with auto-redirect on shows the sign-in card
   instead of bouncing straight back to the provider, and a crafted
   `/oidc/callback?error=` link no longer evicts a signed-in user.
