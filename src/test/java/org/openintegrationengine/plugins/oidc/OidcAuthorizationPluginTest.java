@@ -221,6 +221,55 @@ class OidcAuthorizationPluginTest {
         }
     }
 
+    /**
+     * The pin is the operator's rescue for a stored secret that no longer
+     * opens, so it must win BEFORE the stored value is judged: a plain-text
+     * leftover or a foreign-key value under a pin is a working policy.
+     */
+    @Test
+    void aPinRescuesAStoredSecretThatCannotBeOpened() throws Exception {
+        FakeCipher cipher = new FakeCipher();
+        System.setProperty("org.openintegrationengine.oidc.client-secret", "pinned-secret");
+        try {
+            OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> cipher, new Slot());
+            plugin.init(policy());   // stored in the clear
+            assertEquals("pinned-secret", OidcAuthorizationPlugin.currentConfig().clientSecret());
+            assertNull(OidcAuthorizationPlugin.currentError());
+
+            Properties foreign = sealedPolicy(cipher);
+            cipher.broken = true;    // sealed under another engine's key
+            plugin.init(foreign);
+            assertEquals("pinned-secret", OidcAuthorizationPlugin.currentConfig().clientSecret());
+            assertNull(OidcAuthorizationPlugin.currentError());
+        } finally {
+            System.clearProperty("org.openintegrationengine.oidc.client-secret");
+        }
+    }
+
+    /**
+     * A save whose secret field came back as the mask carries the STORED,
+     * already-sealed value (the servlet's merge keeps it). Sealing must leave
+     * it exactly as it is: sealing twice would store a value that opens to
+     * ciphertext, and every sign-in would present the wrong secret.
+     */
+    @Test
+    void aSaveCarryingAnAlreadySealedSecretStoresItUnchanged() throws Exception {
+        FakeCipher cipher = new FakeCipher();
+        Slot slot = new Slot();
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> cipher, slot);
+        Properties stored = sealedPolicy(cipher);
+        plugin.init(stored);
+
+        Properties resave = new Properties();
+        resave.putAll(stored);
+        resave.setProperty("provider-label", "Renamed");   // the only edit; the secret field showed the mask
+        OidcConfigLoader.saveAndApply(resave);
+
+        assertEquals(stored.getProperty("client-secret"), slot.saved.getProperty("client-secret"), "sealed once, not twice");
+        assertEquals("test-client-secret", OidcAuthorizationPlugin.currentConfig().clientSecret());
+        assertEquals("Renamed", OidcAuthorizationPlugin.currentConfig().providerLabel());
+    }
+
     @Test
     void anEmptySecretNeedsNoSealAndADisabledPolicyStillLoads() {
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin(() -> new FakeCipher(), new Slot());

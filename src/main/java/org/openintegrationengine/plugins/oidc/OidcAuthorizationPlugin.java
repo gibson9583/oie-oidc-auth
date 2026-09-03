@@ -207,7 +207,12 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         }
         properties = snapshot;
         try {
-            config = OidcConfig.from(OidcConfigLoader.withOverrides(cipher().openAll(snapshot)));
+            // Pins first, then open only what is not pinned. A pin is the
+            // operator's way to rescue a stored secret that no longer opens —
+            // written in the clear by an older build, or sealed under another
+            // engine's key — and it arrives in the clear itself.
+            Properties effective = OidcConfigLoader.withOverrides(snapshot);
+            config = OidcConfig.from(cipher().openAll(effective, OidcConfigLoader.pinned()));
             validator = config.enabled() ? new OidcTokenValidator(config, new DiscoveryClient()) : null;
             // One line that answers "why is there no SSO button?" without a
             // debugger. That question has several causes — extension present but

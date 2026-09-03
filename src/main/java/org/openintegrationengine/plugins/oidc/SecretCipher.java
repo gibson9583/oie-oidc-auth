@@ -75,12 +75,17 @@ interface SecretCipher {
         return out;
     }
 
-    /** A copy of the policy with every SECRET key opened. */
-    default Properties openAll(Properties stored) {
+    /**
+     * A copy of the policy with every SECRET key opened, except the ones in
+     * {@code inTheClear}: an operator pin arrives as plain text and is the way
+     * to rescue a stored secret that cannot be opened, so it must never be
+     * pushed through the cipher.
+     */
+    default Properties openAll(Properties stored, java.util.Set<String> inTheClear) {
         Properties out = new Properties();
         out.putAll(stored);
         for (PolicySchema.Key key : PolicySchema.KEYS) {
-            if (key.kind() == PolicySchema.Kind.SECRET && out.containsKey(key.name())) {
+            if (key.kind() == PolicySchema.Kind.SECRET && out.containsKey(key.name()) && !inTheClear.contains(key.name())) {
                 out.setProperty(key.name(), open(key.name(), out.getProperty(key.name())));
             }
         }
