@@ -10,7 +10,7 @@ This extension adds OpenID Connect single sign-on to the OIE web administrator. 
 - OIE web administrator 0.9.0 or newer.
 - A confidential client at an OpenID Connect provider. You need its client ID and client secret.
 - The redirect URI `<web-administrator-url>/oidc/callback`, registered at the provider.
-- Optional: the role-based-access-control (RBAC) extension. Role assignment needs it. Read *Just-in-time users* before you enable user creation without it.
+- Optional: the role-based-access-control (RBAC) extension, 1.1.3 or newer. Role assignment needs it. Earlier RBAC releases let any role read every plugin's stored properties through the engine's generic properties endpoint. Read *Just-in-time users* before you enable user creation without it.
 
 To build: Java 17, Maven, and an OIE 4.6.0 installation.
 
@@ -20,7 +20,7 @@ To build: Java 17, Maven, and an OIE 4.6.0 installation.
 OIE_HOME=/path/to/oie mvn clean package
 ```
 
-The build writes `target/oidcauth-1.0.0.zip`. Each release on GitHub also carries this file.
+The build writes `target/oidcauth-1.0.1.zip`. Each release on GitHub also carries this file.
 
 ## Install
 
