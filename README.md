@@ -20,7 +20,7 @@ To build: Java 17, Maven, and an OIE 4.6.0 installation.
 OIE_HOME=/path/to/oie mvn clean package
 ```
 
-The build writes `target/oidcauth-1.0.1.zip`. Each release on GitHub also carries this file.
+The build writes `target/oidcauth-1.0.2.zip`. Each release on GitHub also carries this file.
 
 ## Install
 
