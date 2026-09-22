@@ -1,0 +1,6 @@
+{
+  "bundle": "target/oidcauth-*.zip",
+  "jars": [
+    "oidcauth/oidcauth-shared.jar"
+  ]
+}
