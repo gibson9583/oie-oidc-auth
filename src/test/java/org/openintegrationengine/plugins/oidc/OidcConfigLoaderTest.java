@@ -32,6 +32,7 @@ class OidcConfigLoaderTest {
         assertEquals(OidcConfigLoader.DEFAULTS.size(), defaults.size());
         OidcConfig config = OidcConfig.from(defaults);   // must not throw
         assertFalse(config.enabled());
+        assertFalse(config.jwtEnabled());
         assertFalse(config.jitEnabled());
         assertTrue(config.allowedAlgorithms().contains("RS256"));
     }

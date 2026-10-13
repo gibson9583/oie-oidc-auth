@@ -12,7 +12,7 @@ let nextRowId=0;
 // The schema carries values; these are the words an operator reads for them.
 // Anything unlisted falls back to the raw value, so adding a choice engine-side
 // shows up here immediately rather than rendering blank.
-const CHOICE_LABELS={'jit.enabled':{true:'Yes',false:'No'},'roles.infer':{false:'No — mapped claims only',true:'Yes — claim values matching a role name'},'roles.sync':{always:'Every login','jit-only':'JIT only',never:'Never'}};
+const CHOICE_LABELS={'jit.enabled':{true:'Yes',false:'No'},'jwt.enabled':{true:'Yes',false:'No'},'roles.infer':{false:'No — mapped claims only',true:'Yes — claim values matching a role name'},'roles.sync':{always:'Every login','jit-only':'JIT only',never:'Never'}};
 const choiceLabel=(key,value)=>(CHOICE_LABELS[key]&&CHOICE_LABELS[key][value])||value;
 // The engine parses booleans strictly, so mirror it rather than treating every
 // unrecognized value as false — a policy the engine rejects should not render

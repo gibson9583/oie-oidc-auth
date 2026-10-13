@@ -22,7 +22,7 @@ import java.util.Set;
  */
 public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, String clientSecret,
         String webAdministratorUrl, java.util.List<String> scopes, String providerLabel, boolean autoRedirect,
-        String usernameClaim,
+        boolean jwtEnabled, String usernameClaim,
         Set<String> allowedAlgorithms, long clockSkewSeconds, long maxTokenAgeSeconds, long jwksCacheTtlSeconds,
         boolean jitEnabled, String emailClaim, String nameClaim, String organizationClaim, String usernamePrefix,
         Map<String, String> linkedAccounts, String rolesClaim, Map<String, String> rolesMap, String defaultRole,
@@ -107,6 +107,10 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
                 scopes,
                 value(p, "provider-label").trim().isEmpty() ? "SSO" : value(p, "provider-label").trim(),
                 bool(p, "auto-redirect"),
+                // FALSE when absent, same rule as jit.enabled: a stored policy
+                // from before this key existed must not start accepting raw
+                // tokens. Direct presentation has no nonce.
+                bool(p, "jwt.enabled"),
                 value(p, "username-claim"),
                 csv(value(p, "allowed-algorithms")),
                 clockSkew,

@@ -36,11 +36,13 @@ import com.nimbusds.jwt.JWTClaimsSet;
  * configured, syncs the RBAC role, and answers with the derived username so
  * the session — and every audited event — belongs to the real named user.
  * A token the same provider minted may also be presented directly as
- * {@code password=oidc:jwt:<jwt>}. It is checked by the same validator
- * (discovery issuer, client-id audience, JWKS, lifetime) and then follows
- * the same account path. It has no nonce, because it did not come from
- * {@code /start}. Anything else presented as an {@code oidc:} password,
- * including a raw ID token, is refused unread.
+ * {@code password=oidc:jwt:<jwt>}, but only when {@code jwt.enabled} is
+ * true. It is checked by the same validator (discovery issuer, client-id
+ * audience, JWKS, lifetime) and then follows the same account path. It has
+ * no nonce, because it did not come from {@code /start}, which is why the
+ * policy leaves it off. Anything else presented as an {@code oidc:}
+ * password, including a raw ID token and a {@code jwt:} credential while
+ * the flag is off, is refused unread.
  *
  * <p>Contract: an {@code oidc:}-prefixed password NEVER returns null — a
  * failed SSO assertion must not degrade into a password guess. An UNPREFIXED password returns null (local auth
@@ -343,9 +345,14 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             }
             String token;
             if (credential.startsWith(JWT_PREFIX)) {
+                // Off unless the policy opts in. Refused unread, same as a bare
+                // ID token: this presentation never went through /start and has
+                // no nonce, so it is not a default.
+                if (!config.jwtEnabled()) {
+                    return fail("SSO sign-in was rejected.");
+                }
                 // A token minted by the configured provider, presented directly.
-                // Same validator as an ID token behind a ticket. No nonce: this
-                // presentation never went through /start.
+                // Same validator as an ID token behind a ticket.
                 token = credential.substring(JWT_PREFIX.length());
                 if (token.isEmpty()) {
                     return fail("SSO sign-in was rejected.");

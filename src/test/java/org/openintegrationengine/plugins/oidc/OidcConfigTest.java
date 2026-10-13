@@ -47,6 +47,15 @@ class OidcConfigTest {
      * tab, which also defaults to "No", showed the feature disabled.
      */
     @Test
+    void directJwtPresentationIsOffWhenTheKeyIsAbsent() {
+        assertFalse(OidcConfig.from(enabled()).jwtEnabled());
+
+        Properties on = enabled();
+        on.setProperty("jwt.enabled", "true");
+        assertTrue(OidcConfig.from(on).jwtEnabled());
+    }
+
+    @Test
     void jitProvisioningIsOffWhenTheKeyIsAbsent() {
         assertFalse(OidcConfig.from(enabled()).jitEnabled());
 

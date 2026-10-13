@@ -5,7 +5,7 @@ var api = platform.api;
 var { toast, taskButton } = platform.ui;
 var EXT = "/extensions/oidcauth";
 var nextRowId = 0;
-var CHOICE_LABELS = { "jit.enabled": { true: "Yes", false: "No" }, "roles.infer": { false: "No \u2014 mapped claims only", true: "Yes \u2014 claim values matching a role name" }, "roles.sync": { always: "Every login", "jit-only": "JIT only", never: "Never" } };
+var CHOICE_LABELS = { "jit.enabled": { true: "Yes", false: "No" }, "jwt.enabled": { true: "Yes", false: "No" }, "roles.infer": { false: "No \u2014 mapped claims only", true: "Yes \u2014 claim values matching a role name" }, "roles.sync": { always: "Every login", "jit-only": "JIT only", never: "Never" } };
 var choiceLabel = (key, value) => CHOICE_LABELS[key] && CHOICE_LABELS[key][value] || value;
 var truthy = (value) => ["true", "yes", "on", "1"].includes(String(value == null ? "" : value).trim().toLowerCase());
 var parsePairs = (value) => String(value || "").split(",").map((s) => s.trim()).filter(Boolean).map((item) => {

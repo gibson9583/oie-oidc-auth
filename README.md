@@ -101,7 +101,7 @@ The engine exposes three operations that need no session: `GET /api/extensions/o
 
 Rules that apply to this flow:
 
-- A browser sign-in uses a ticket. A token the configured provider minted can also be presented as `password=oidc:jwt:<jwt>`. The engine validates that token the same way as an ID token — discovery issuer, client-id audience, JWKS, lifetime — and then opens the session. It does not check a nonce. An ID token sent without the `jwt:` prefix is refused unread.
+- A browser sign-in uses a ticket. When `jwt.enabled` is true, a token the configured provider minted can also be presented as `password=oidc:jwt:<jwt>`. The engine validates that token the same way as an ID token — discovery issuer, client-id audience, JWKS, lifetime — and then opens the session. It does not check a nonce. The key defaults to false, and while it is false that presentation is refused unread. An ID token sent without the `jwt:` prefix is refused unread.
 - The return route must be a path on the web administrator of at most 2048 characters. Any other value returns the user to `/`.
 - The code exchange uses `client_secret_basic`. It uses `client_secret_post` only when the provider's discovery document lists `client_secret_post` and not `client_secret_basic`.
 - The engine limits `/callback` to sixty requests per minute per client and six hundred per minute in total. The client is the first `X-Forwarded-For` address when the header is present, and the peer address otherwise. `/public` and `/start` have no limit.
@@ -184,6 +184,7 @@ Every key lives in the engine database and is edited under **Settings → OIDC A
 | `web-administrator-url` | *(empty)* | The address browsers open the web administrator at, for example `https://oie-admin.example` or `https://engine.example:8443/oie-webadmin`. A base URL with no query, fragment, or credentials. HTTPS, or HTTP for `localhost`. The redirect URI is `<this>/oidc/callback`. Required when enabled. |
 | `provider-label` | `SSO` | The sign-in button reads "Sign in with `<label>`". |
 | `auto-redirect` | `false` | Send visitors to the provider at once instead of showing the button. Local sign-in stays available. |
+| `jwt.enabled` | `false` | Accept `password=oidc:jwt:<jwt>` from the configured provider. The browser ticket flow does not use this key. |
 | `scopes` | `openid profile email` | Scopes requested from the provider, separated by spaces or commas. `openid` is always included. |
 | `username-claim` | `preferred_username` | The claim that becomes the engine username. |
 | `username-prefix` | *(empty)* | Text put in front of the normalized username. Must match `a-z 0-9 . _ @ + : -`. |

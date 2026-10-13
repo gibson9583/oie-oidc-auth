@@ -82,6 +82,7 @@ public final class PolicySchema {
             new Key("web-administrator-url", "", Kind.URL, "Web administrator URL"),
             new Key("provider-label", "SSO", Kind.TEXT, "Sign-in button label"),
             new Key("auto-redirect", "false", Kind.BOOLEAN, "Send visitors straight to the provider"),
+            new Key("jwt.enabled", "false", Kind.BOOLEAN, "Accept direct JWT sign-in"),
             new Key("scopes", "openid profile email", Kind.TEXT, "Scopes"),
             new Key("username-claim", "preferred_username", Kind.TEXT, "Username claim"),
             new Key("allowed-algorithms", "RS256,RS384,RS512,ES256,ES384,ES512", Kind.TEXT, "Allowed algorithms"),

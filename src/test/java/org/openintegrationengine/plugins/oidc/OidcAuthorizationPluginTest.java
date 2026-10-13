@@ -326,16 +326,40 @@ class OidcAuthorizationPluginTest {
     }
 
     /**
+     * {@code oidc:jwt:} is off unless the policy turns it on. A presentation
+     * while it is off is refused unread — the validator is not consulted — and
+     * a ticket for the browser flow still proceeds.
+     */
+    @Test
+    void aDirectJwtIsRefusedWhenTheFlagIsOffAndATicketStillProceeds() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        OidcAuthorizationPlugin plugin = accepting(validator);
+
+        LoginStatus jwt = plugin.authorizeUser("ignored", "oidc:jwt:token-aaa");
+        assertEquals(Status.FAIL, jwt.getStatus());
+        assertEquals("SSO sign-in was rejected.", jwt.getMessage());
+        verify(validator, never()).validate(any());
+
+        LoginStatus ticket = plugin.authorizeUser("oidc", ticketFor(plugin, "token-bbb"));
+        assertEquals("SSO sign-in was rejected.", ticket.getMessage(), "past the token checks; refused by provisioning");
+        verify(validator, times(1)).validate("token-bbb");
+    }
+
+    /**
      * {@code oidc:jwt:} is a token the configured provider minted. The same
      * validator that checks an ID token accepts it, the account path runs, and
      * the returned username is the session. A second presentation is a replay.
+     * The policy must opt in; the default is off.
      */
     @Test
     void aProviderTokenPresentedAsJwtStartsASessionAndCannotBeReplayed() throws Exception {
         OidcTokenValidator validator = mock(OidcTokenValidator.class);
         when(validator.validate("token-aaa")).thenReturn(validClaims());
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
-        plugin.configure(OidcConfig.from(policy()), validator, directory(true));
+        plugin.configure(OidcConfig.from(p), validator, directory(true));
 
         LoginStatus status = plugin.authorizeUser("ignored", "oidc:jwt:token-aaa");
         assertEquals(Status.SUCCESS, status.getStatus());
