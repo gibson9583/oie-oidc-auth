@@ -212,6 +212,9 @@ class OidcFlowTest {
 
         assertEquals("/dashboard", done.returnPath());
         assertEquals(nonce.get(), SignedJWT.parse(done.idToken()).getJWTClaimsSet().getStringClaim("nonce"));
+        // The name the login will demand, mapped from the same claims by the
+        // same policy: the client cannot redeem the ticket without it.
+        assertEquals("jdoe", done.username());
         Map<String, String> sent = lastTokenRequest.get();
         assertEquals("https://admin.test/oidc/callback", sent.get("redirect_uri"));
         // client_secret_basic, the method every provider must support: the

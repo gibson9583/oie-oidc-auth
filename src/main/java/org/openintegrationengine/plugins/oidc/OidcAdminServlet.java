@@ -139,6 +139,7 @@ public final class OidcAdminServlet extends MirthServlet implements OidcAdminSer
             out.put("ok", true);
             out.put("ticket", tickets.issue(done.idToken(), now));
             out.put("returnPath", done.returnPath());
+            out.put("username", done.username());
             return out.toString();
         } catch (Exception e) {
             log.warn("OIDC sign-in could not complete: {}", e.toString());

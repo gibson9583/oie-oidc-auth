@@ -21,6 +21,7 @@ import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nimbusds.jwt.JWTClaimsSet;
 
 /**
  * The browser-facing half of the Authorization Code + PKCE flow, run by the
@@ -36,7 +37,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * to send the browser to.</li>
  * <li>{@link #complete} opens the seal, checks the echoed state, exchanges the
  * code for tokens with the client secret and the PKCE verifier, and validates
- * the ID token including its nonce.</li>
+ * the ID token including its nonce, then maps its claims to the engine
+ * username the login will require.</li>
  * </ol>
  */
 final class OidcFlow {
@@ -53,7 +55,7 @@ final class OidcFlow {
     static final int MAX_RETURN_PATH_LENGTH = 2048;
 
     record Start(String authorizeUrl, String sealed) {}
-    record Completion(String idToken, String returnPath) {}
+    record Completion(String idToken, String returnPath, String username) {}
 
     private final HttpClient http;
     private final ObjectMapper json = new ObjectMapper();
@@ -144,8 +146,12 @@ final class OidcFlow {
         String idToken = tokens.get("id_token").asText();
         // The nonce ties the token to THIS attempt: a token minted for another
         // sign-in, replayed here with a valid code, fails on this line.
-        validator.validate(idToken, txn.nonce());
-        return new Completion(idToken, txn.returnPath());
+        JWTClaimsSet claims = validator.validate(idToken, txn.nonce());
+        // The login refuses a ticket unless the submitted username is exactly
+        // the one these claims map to, so the client must be told that name.
+        // Same mapper, same policy as the login: the two cannot disagree.
+        String username = new ClaimsMapper().map(claims, config).username();
+        return new Completion(idToken, txn.returnPath(), username);
     }
 
     /**

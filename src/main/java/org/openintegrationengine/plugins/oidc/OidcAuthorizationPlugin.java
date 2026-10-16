@@ -29,12 +29,15 @@ import com.nimbusds.jwt.JWTClaimsSet;
 /**
  * The engine half of the web administrator's OpenID Connect sign-in. The
  * engine runs the browser-facing flow itself ({@link OidcFlow}); its callback
- * validates the ID token, nonce included, and issues a one-time ticket that
- * the web client redeems through the engine's ordinary login as
- * {@code password=oidc:ticket:<id>}. This plugin turns the ticket back into
- * the validated token, maps claims to an engine identity, JIT-provisions when
- * configured, syncs the RBAC role, and answers with the derived username so
- * the session — and every audited event — belongs to the real named user.
+ * validates the ID token, nonce included, and issues a one-time ticket along
+ * with the engine username the token maps to. The web client redeems the
+ * ticket through the engine's ordinary login as
+ * {@code username=<that username>, password=oidc:ticket:<id>}. This plugin
+ * turns the ticket back into the validated token, maps claims to an engine
+ * identity, refuses unless the submitted username is exactly that identity,
+ * JIT-provisions when configured, syncs the RBAC role, and answers with the
+ * derived username so the session — and every audited event — belongs to the
+ * real named user.
  * A token the same provider minted may also be presented directly as
  * {@code password=oidc:jwt:<jwt>}, but only when {@code jwt.enabled} is
  * true. It is checked by the same validator (discovery issuer, client-id
@@ -45,7 +48,13 @@ import com.nimbusds.jwt.JWTClaimsSet;
  * the flag is off, is refused unread.
  *
  * <p>Contract: an {@code oidc:}-prefixed password NEVER returns null — a
- * failed SSO assertion must not degrade into a password guess. An UNPREFIXED password returns null (local auth
+ * failed SSO assertion must not degrade into a password guess. It succeeds
+ * only when the submitted username equals the mapped username exactly, for
+ * both {@code ticket:} and {@code jwt:}. The engine's HTTP Basic login runs
+ * the request as the username it was SENT, not the one this plugin returns,
+ * so a ticket presented under another account's name would otherwise act as
+ * that account. A placeholder such as {@code oidc} gets no exception: an
+ * engine user can carry that name too. An UNPREFIXED password returns null (local auth
  * decides, with the engine's own lockout) unless the account is SSO-managed —
  * bound to a provider subject, not listed in {@code linked-accounts}, while
  * SSO is active — in which case it is refused: that account signs in through
@@ -385,6 +394,21 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             }
 
             ClaimsMapper.Identity identity = mapper.map(claims, config);
+            // The submitted username must BE the token's user. The engine's
+            // HTTP Basic path (every REST endpoint) splits the header at the
+            // first colon, authorizes, and then runs the request as the
+            // SUBMITTED name; it never reads the updated username returned
+            // below. Without this check, Basic "admin:oidc:ticket:<id>" with a
+            // ticket from one's own sign-in ran as admin. Exact and
+            // case-sensitive: the mapped name is already normalized, and a
+            // looser match could let a case-insensitive lookup resolve a
+            // different account. Checked before provisioning, so a mismatch
+            // creates no account and changes no role; the token stays spent.
+            if (!identity.username().equals(username)) {
+                log.warn("OIDC login rejected: the submitted username does not match the token's user '{}'",
+                        identity.username());
+                return fail("SSO sign-in was rejected.");
+            }
             UserProvisioner.Result provisioned = new UserProvisioner(users.get()).provision(identity, config);
             roles.assign(provisioned.user().getId(), provisioned.created(), identity, config);
             // The engine's own event log records every login; this is for a

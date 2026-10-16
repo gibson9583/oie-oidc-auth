@@ -16,6 +16,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
@@ -318,7 +319,7 @@ class OidcAuthorizationPluginTest {
         when(validator.validate(any())).thenReturn(validClaims());
         OidcAuthorizationPlugin plugin = accepting(validator);
 
-        LoginStatus status = plugin.authorizeUser("oidc", "oidc:eyJhbGciOiJSUzI1NiJ9.e30.sig");
+        LoginStatus status = plugin.authorizeUser("jdoe", "oidc:eyJhbGciOiJSUzI1NiJ9.e30.sig");
         assertNotNull(status);
         assertEquals(Status.FAIL, status.getStatus());
         assertEquals("SSO sign-in was rejected.", status.getMessage());
@@ -336,12 +337,12 @@ class OidcAuthorizationPluginTest {
         when(validator.validate(any())).thenReturn(validClaims());
         OidcAuthorizationPlugin plugin = accepting(validator);
 
-        LoginStatus jwt = plugin.authorizeUser("ignored", "oidc:jwt:token-aaa");
+        LoginStatus jwt = plugin.authorizeUser("jdoe", "oidc:jwt:token-aaa");
         assertEquals(Status.FAIL, jwt.getStatus());
         assertEquals("SSO sign-in was rejected.", jwt.getMessage());
         verify(validator, never()).validate(any());
 
-        LoginStatus ticket = plugin.authorizeUser("oidc", ticketFor(plugin, "token-bbb"));
+        LoginStatus ticket = plugin.authorizeUser("jdoe", ticketFor(plugin, "token-bbb"));
         assertEquals("SSO sign-in was rejected.", ticket.getMessage(), "past the token checks; refused by provisioning");
         verify(validator, times(1)).validate("token-bbb");
     }
@@ -361,12 +362,12 @@ class OidcAuthorizationPluginTest {
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         plugin.configure(OidcConfig.from(p), validator, directory(true));
 
-        LoginStatus status = plugin.authorizeUser("ignored", "oidc:jwt:token-aaa");
+        LoginStatus status = plugin.authorizeUser("jdoe", "oidc:jwt:token-aaa");
         assertEquals(Status.SUCCESS, status.getStatus());
         assertEquals("jdoe", status.getUpdatedUsername());
         verify(validator, times(1)).validate("token-aaa");
 
-        assertEquals("SSO assertion was already used.", plugin.authorizeUser("ignored", "oidc:jwt:token-aaa").getMessage());
+        assertEquals("SSO assertion was already used.", plugin.authorizeUser("jdoe", "oidc:jwt:token-aaa").getMessage());
         verify(validator, times(2)).validate("token-aaa");
     }
 
@@ -393,20 +394,113 @@ class OidcAuthorizationPluginTest {
         OidcAuthorizationPlugin plugin = accepting(validator);
 
         String first = ticketFor(plugin, "token-aaa");
-        LoginStatus redeemed = plugin.authorizeUser("oidc", first);
+        LoginStatus redeemed = plugin.authorizeUser("jdoe", first);
         assertEquals(Status.FAIL, redeemed.getStatus());
         assertEquals("SSO sign-in was rejected.", redeemed.getMessage(), "past the token checks; refused by provisioning");
         verify(validator, times(1)).validate("token-aaa");
 
-        assertEquals("SSO sign-in expired or was already used. Try again.", plugin.authorizeUser("oidc", first).getMessage());
+        assertEquals("SSO sign-in expired or was already used. Try again.", plugin.authorizeUser("jdoe", first).getMessage());
 
-        LoginStatus replayed = plugin.authorizeUser("oidc", ticketFor(plugin, "token-aaa"));
+        LoginStatus replayed = plugin.authorizeUser("jdoe", ticketFor(plugin, "token-aaa"));
         assertEquals("SSO assertion was already used.", replayed.getMessage(),
                 "a second ticket for the same token must be refused as a replay");
 
         // A DIFFERENT token is unaffected — the cache keys on the token, not the
         // user, so one replay must not lock somebody out.
-        assertEquals("SSO sign-in was rejected.", plugin.authorizeUser("oidc", ticketFor(plugin, "token-bbb")).getMessage());
+        assertEquals("SSO sign-in was rejected.", plugin.authorizeUser("jdoe", ticketFor(plugin, "token-bbb")).getMessage());
+    }
+
+    /* ---- the submitted username must be the token's user ----------------- */
+
+    /**
+     * The engine's HTTP Basic path runs a request as the username it was SENT,
+     * never the one this plugin returns. So a valid ticket from one's own
+     * sign-in, presented as {@code admin:oidc:ticket:<id>}, acted as admin.
+     * Refused here — before the directory is touched, so nothing is
+     * provisioned and no role moves — and the token stays spent.
+     */
+    @Test
+    void aTicketPresentedUnderAnotherAccountsNameIsRefused() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        UserController users = directory(true);
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(policy()), validator, users);
+
+        LoginStatus status = plugin.authorizeUser("admin", ticketFor(plugin, "token-aaa"));
+        assertEquals(Status.FAIL, status.getStatus());
+        assertEquals("SSO sign-in was rejected.", status.getMessage());
+        verifyNoInteractions(users);
+
+        assertEquals("SSO assertion was already used.", plugin.authorizeUser("jdoe", ticketFor(plugin, "token-aaa")).getMessage(),
+                "a refused presentation still spends the token");
+    }
+
+    @Test
+    void aJwtPresentedUnderAnotherAccountsNameIsRefused() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        UserController users = directory(true);
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(p), validator, users);
+
+        LoginStatus status = plugin.authorizeUser("admin", "oidc:jwt:token-aaa");
+        assertEquals(Status.FAIL, status.getStatus());
+        assertEquals("SSO sign-in was rejected.", status.getMessage());
+        verifyNoInteractions(users);
+
+        assertEquals(Status.SUCCESS, plugin.authorizeUser("jdoe", "oidc:jwt:token-bbb").getStatus(),
+                "the token's own user still signs in");
+    }
+
+    /**
+     * A client that sends no username — an old web client, a hand-built
+     * request — does not fall back to the token's user. The name is part of
+     * the credential: without it the login is refused, before the directory is
+     * touched, for a ticket and a jwt: token alike.
+     */
+    @Test
+    void aMissingUsernameIsRefusedRatherThanFilledIn() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        UserController users = directory(true);
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(p), validator, users);
+
+        String[] missing = { null, "", " " };
+        for (int i = 0; i < missing.length; i++) {
+            LoginStatus ticket = plugin.authorizeUser(missing[i], ticketFor(plugin, "ticket-token-" + i));
+            assertEquals(Status.FAIL, ticket.getStatus(), "ticket with username [" + missing[i] + "]");
+            assertEquals("SSO sign-in was rejected.", ticket.getMessage());
+            LoginStatus jwt = plugin.authorizeUser(missing[i], "oidc:jwt:jwt-token-" + i);
+            assertEquals(Status.FAIL, jwt.getStatus(), "jwt with username [" + missing[i] + "]");
+            assertEquals("SSO sign-in was rejected.", jwt.getMessage());
+        }
+        verifyNoInteractions(users);
+    }
+
+    /**
+     * No placeholder is exempt: an engine user can be named {@code oidc}, and
+     * an IdP claim can produce that name through JIT. Nor a case variant: the
+     * mapped name is already lower-cased, and a looser match could let an
+     * engine with case-insensitive lookups resolve a different account.
+     */
+    @Test
+    void neitherAPlaceholderNorACaseVariantOfTheUsernameIsAccepted() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(p), validator, directory(true));
+
+        assertEquals(Status.FAIL, plugin.authorizeUser("oidc", "oidc:jwt:token-aaa").getStatus());
+        assertEquals(Status.FAIL, plugin.authorizeUser("JDoe", "oidc:jwt:token-bbb").getStatus());
+        assertEquals(Status.FAIL, plugin.authorizeUser(null, "oidc:jwt:token-ccc").getStatus());
     }
 
     /**
