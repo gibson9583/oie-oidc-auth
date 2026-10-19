@@ -44,6 +44,12 @@ class OidcAuthorizationPluginTest {
 
     private static final String KILL_SWITCH = "org.openintegrationengine.oidc.disabled";
     private static final String SUBJECT = "https://issuer.example#subject-1";
+    /**
+     * A start time well before any test token, for tests about something other
+     * than the startup cutoff: a jwt: token issued in the first skew seconds
+     * of an instance's life is refused.
+     */
+    private static final long LONG_AGO = 0L;
 
     @AfterEach
     void clearKillSwitch() {
@@ -295,10 +301,16 @@ class OidcAuthorizationPluginTest {
     }
 
     private static JWTClaimsSet validClaims() {
-        Date now = new Date();
-        return new JWTClaimsSet.Builder().issuer("https://issuer.example").audience("client")
-                .subject("subject-1").claim("preferred_username", "jdoe")
-                .issueTime(now).expirationTime(new Date(now.getTime() + 300_000)).build();
+        return claimsIssuedAt(new Date());
+    }
+
+    private static JWTClaimsSet claimsIssuedAt(Date issued) {
+        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder().issuer("https://issuer.example").audience("client")
+                .subject("subject-1").claim("preferred_username", "jdoe");
+        if (issued != null) {
+            claims.issueTime(issued).expirationTime(new Date(issued.getTime() + 300_000));
+        }
+        return claims.build();
     }
 
     private static String ticketFor(OidcAuthorizationPlugin plugin, String token) {
@@ -361,6 +373,7 @@ class OidcAuthorizationPluginTest {
         p.setProperty("jwt.enabled", "true");
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         plugin.configure(OidcConfig.from(p), validator, directory(true));
+        plugin.startedAt(LONG_AGO);
 
         LoginStatus status = plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sig");
         assertEquals(Status.SUCCESS, status.getStatus());
@@ -386,6 +399,7 @@ class OidcAuthorizationPluginTest {
         p.setProperty("jwt.enabled", "true");
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         plugin.configure(OidcConfig.from(p), validator, directory(true));
+        plugin.startedAt(LONG_AGO);
 
         assertEquals(Status.SUCCESS, plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sigA").getStatus());
 
@@ -479,6 +493,7 @@ class OidcAuthorizationPluginTest {
         UserController users = directory(true);
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         plugin.configure(OidcConfig.from(p), validator, users);
+        plugin.startedAt(LONG_AGO);
 
         LoginStatus status = plugin.authorizeUser("admin", "oidc:jwt:header.aaa.sig");
         assertEquals(Status.FAIL, status.getStatus());
@@ -504,6 +519,7 @@ class OidcAuthorizationPluginTest {
         UserController users = directory(true);
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         plugin.configure(OidcConfig.from(p), validator, users);
+        plugin.startedAt(LONG_AGO);
 
         String[] missing = { null, "", " " };
         for (int i = 0; i < missing.length; i++) {
@@ -531,6 +547,7 @@ class OidcAuthorizationPluginTest {
         p.setProperty("jwt.enabled", "true");
         OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
         plugin.configure(OidcConfig.from(p), validator, directory(true));
+        plugin.startedAt(LONG_AGO);
 
         assertEquals(Status.FAIL, plugin.authorizeUser("oidc", "oidc:jwt:header.aaa.sig").getStatus());
         assertEquals(Status.FAIL, plugin.authorizeUser("JDoe", "oidc:jwt:header.bbb.sig").getStatus());
@@ -550,6 +567,87 @@ class OidcAuthorizationPluginTest {
         assertEquals(360_000L, OidcAuthorizationPlugin.replayTtlMillis(OidcConfig.from(p)));
         p.setProperty("clock-skew-seconds", "0");
         assertEquals(300_000L, OidcAuthorizationPlugin.replayTtlMillis(OidcConfig.from(p)));
+    }
+
+    /* ---- a restart does not bring spent tokens back ---------------------- */
+
+    /**
+     * The replay cache lives in memory and starts empty with each instance, so
+     * a jwt: token issued before the instance began may have been spent on an
+     * earlier run. It is refused, and so is one issued within the clock skew
+     * after the start, since a provider clock running behind can stamp a
+     * pre-restart token that late. From startedAt + skew on, tokens are
+     * accepted. A token without iat is refused.
+     */
+    @Test
+    void aJwtIssuedBeforeThisInstanceCouldRememberItIsRefused() throws Exception {
+        long started = 1_700_000_000_000L;
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate("header.before.sig")).thenReturn(claimsIssuedAt(new Date(started - 10_000)));
+        when(validator.validate("header.within.sig")).thenReturn(claimsIssuedAt(new Date(started + 59_000)));
+        when(validator.validate("header.noiat.sig")).thenReturn(claimsIssuedAt(null));
+        when(validator.validate("header.after.sig")).thenReturn(claimsIssuedAt(new Date(started + 60_000)));
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        p.setProperty("clock-skew-seconds", "60");
+        UserController users = directory(true);
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(p), validator, users);
+        plugin.startedAt(started);
+
+        for (String token : new String[] { "header.before.sig", "header.within.sig", "header.noiat.sig" }) {
+            LoginStatus status = plugin.authorizeUser("jdoe", "oidc:jwt:" + token);
+            assertEquals(Status.FAIL, status.getStatus(), token);
+            assertEquals("SSO sign-in was rejected.", status.getMessage(), token);
+        }
+        verifyNoInteractions(users);
+
+        assertEquals(Status.SUCCESS, plugin.authorizeUser("jdoe", "oidc:jwt:header.after.sig").getStatus(),
+                "a token issued at startedAt + skew is accepted");
+    }
+
+    /**
+     * A ticket cannot carry a spent token: the callback got the token behind it
+     * from the provider's token endpoint by redeeming a single-use code, and
+     * tickets do not survive a restart. So the cutoff does not apply, and a
+     * provider clock running behind does not refuse real browser sign-ins in
+     * the first minute after a restart.
+     */
+    @Test
+    void aTicketIsNotSubjectToTheStartupCutoff() throws Exception {
+        long started = System.currentTimeMillis();
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(claimsIssuedAt(new Date(started - 10_000)));
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(policy()), validator, directory(true));
+        plugin.startedAt(started);
+
+        LoginStatus status = plugin.authorizeUser("jdoe", ticketFor(plugin, "header.aaa.sig"));
+        assertEquals(Status.SUCCESS, status.getStatus());
+        assertEquals("jdoe", status.getUpdatedUsername());
+    }
+
+    /**
+     * Stopping the plugin drops outstanding tickets, but not the record of
+     * spent tokens: forgetting those is what would let one sign in again.
+     */
+    @Test
+    void aSpentTokenStaysSpentAcrossStop() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate(any())).thenReturn(validClaims());
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(p), validator, directory(true));
+        plugin.startedAt(LONG_AGO);
+
+        assertEquals(Status.SUCCESS, plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sig").getStatus());
+        String pending = ticketFor(plugin, "header.bbb.sig");
+        plugin.stop();
+
+        assertEquals("SSO assertion was already used.", plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sig").getMessage());
+        assertEquals("SSO sign-in expired or was already used. Try again.", plugin.authorizeUser("jdoe", pending).getMessage(),
+                "stop() still drops outstanding tickets");
     }
 
     /* ---- SSO-managed accounts have no local way in ----------------------- */

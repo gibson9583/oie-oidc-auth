@@ -100,10 +100,6 @@ final class ReplayCache {
     private static final Pattern CANONICAL_SIGNED_CONTENT =
             Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
 
-    void clear() {
-        seen.clear();
-    }
-
     /**
      * A truncated SHA-256, so a heap dump or a debugger does not hand out live
      * bearer tokens. 64 bits of a cryptographic hash: a collision would let one

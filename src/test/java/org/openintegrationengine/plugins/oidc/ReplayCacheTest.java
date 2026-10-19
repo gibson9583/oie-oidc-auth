@@ -165,13 +165,6 @@ class ReplayCacheTest {
                 "a cache holding only expired records must accept a new token");
     }
 
-    @Test
-    void clearForgetsEverything() {
-        assertTrue(cache.claim(jws("token"), TTL, 1_000_000));
-        cache.clear();
-        assertTrue(cache.claim(jws("token"), TTL, 1_000_000), "a stopped plugin keeps no records");
-    }
-
     /**
      * Hashed, so a heap dump or a debugger does not hand out live bearer tokens.
      */

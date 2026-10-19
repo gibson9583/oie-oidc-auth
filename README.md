@@ -116,7 +116,8 @@ Rules that apply to this flow:
 - The token algorithm must be in `allowed-algorithms`. The engine never accepts `HS*` or `none`.
 - `iss` must equal the discovery document's issuer. `aud` must contain the client ID. A token with several audiences must carry `azp` equal to the client ID.
 - `exp`, `nbf`, and `iat` are checked against the engine clock with `clock-skew-seconds` of tolerance. `iat` must be at most `max-token-age-seconds` old.
-- The engine remembers each accepted token for `max-token-age-seconds` plus `clock-skew-seconds` and refuses it a second time. This memory lives in the engine process. A restart clears it, and engine nodes do not share it.
+- The engine remembers each accepted token for `max-token-age-seconds` plus `clock-skew-seconds` and refuses it a second time. This memory lives in the engine process. It starts empty when the engine starts, and engine nodes do not share it.
+- Because that memory starts empty, an `oidc:jwt:` token is refused if its `iat` is earlier than the engine's start time plus `clock-skew-seconds`. After a restart, a client must fetch a new token, and a token issued in the first `clock-skew-seconds` after startup is refused too. Browser sign-ins through a ticket are not affected.
 
 ## Accounts
 
@@ -210,5 +211,5 @@ Every key lives in the engine database and is edited under **Settings → OIDC A
 - Confidential clients only. The engine holds the client secret. Public clients with PKCE only are not supported.
 - One identity provider per engine. The engine loads one authorization plugin.
 - One role per user. `roles.map` gives the first match, not a union.
-- Replay memory is per engine process. See *Token validation*.
+- Replay memory is per engine process. Several engines behind one load balancer do not share it, so with `jwt.enabled` a token spent on one engine can be spent again on another. See *Token validation*.
 - Removal of a user at the provider blocks the next sign-in. It does not disable or delete the engine account. Delete the engine user as well.

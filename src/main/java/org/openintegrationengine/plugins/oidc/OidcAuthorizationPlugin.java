@@ -94,6 +94,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     /** Why the last apply() rejected the policy, or null if it took. */
     private volatile String lastError;
     private final ReplayCache replays = new ReplayCache();
+    private long startedAt = System.currentTimeMillis();
     /** Validated tokens waiting to be redeemed through the engine's own login. */
     private final LoginTicketStore tickets = new LoginTicketStore();
     private final ClaimsMapper mapper = new ClaimsMapper();
@@ -145,7 +146,6 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
 
     @Override
     public void stop() {
-        replays.clear();
         tickets.clear();
     }
 
@@ -323,6 +323,11 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         return tickets;
     }
 
+    /** Test seam: when this instance's replay memory began. */
+    void startedAt(long millis) {
+        this.startedAt = millis;
+    }
+
     /**
      * How long a spent token must be remembered: as long as the validator
      * would still accept it. The freshness window is
@@ -331,6 +336,12 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
      */
     static long replayTtlMillis(OidcConfig config) {
         return (config.maxTokenAgeSeconds() + config.clockSkewSeconds()) * 1000L;
+    }
+
+    /** Whether a token's {@code iat} falls before this instance's replay memory, skew included. */
+    private boolean issuedBeforeStart(JWTClaimsSet claims, OidcConfig config) {
+        return claims.getIssueTime() == null
+                || claims.getIssueTime().getTime() < startedAt + config.clockSkewSeconds() * 1000L;
     }
 
     private boolean disabled() {
@@ -353,7 +364,8 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 return fail("SSO is disabled on this engine.");
             }
             String token;
-            if (credential.startsWith(JWT_PREFIX)) {
+            boolean direct = credential.startsWith(JWT_PREFIX);
+            if (direct) {
                 // Off unless the policy opts in. Refused unread, same as a bare
                 // ID token: this presentation never went through /start and has
                 // no nonce, so it is not a default.
@@ -385,6 +397,19 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 return fail("SSO sign-in was rejected.");
             }
             JWTClaimsSet claims = validator.validate(token);
+            // The replay cache lives in memory and starts empty with this
+            // instance, so a jwt: token issued before then may already have been
+            // spent on an earlier run. Refuse it rather than assume it was not.
+            // The skew covers a provider clock running behind, which can stamp
+            // a pre-restart token a little after startedAt. A ticket needs no
+            // such check: the browser never supplies the token behind one. The
+            // callback fetched it from the provider's token endpoint with a
+            // single-use code, PKCE verifier and client secret, so no spent
+            // token can be fed in, and tickets do not survive a restart.
+            if (direct && issuedBeforeStart(claims, config)) {
+                log.debug("OIDC login rejected: the jwt: token was issued before this engine's replay memory began");
+                return fail("SSO sign-in was rejected.");
+            }
             // Only AFTER the token proves valid: recording an unverified string
             // would let anyone fill the cache with garbage, and the capacity
             // guard refuses logins when full. A ticket is single-use, so this is
