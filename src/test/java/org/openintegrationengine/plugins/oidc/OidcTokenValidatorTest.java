@@ -6,15 +6,23 @@
 
 package org.openintegrationengine.plugins.oidc;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.OutputStream;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -24,10 +32,14 @@ import org.junit.jupiter.api.Test;
 
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.ECDSASigner;
 import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.Curve;
+import com.nimbusds.jose.jwk.ECKey;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.gen.ECKeyGenerator;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
@@ -231,5 +243,135 @@ class OidcTokenValidatorTest {
         assertThrows(Exception.class, () -> afterRetirement.validate(sign(claims().build(), retiring)));
 
         served = new JWKSet(signingKey.toPublicJWK());           // leave the fixture as found
+    }
+
+    /* ---- the signature segment is malleable ------------------------------ */
+
+    /**
+     * One signed token, several spellings that all verify. The signature
+     * segment is not covered by the signature: ECDSA accepts {@code n−s} as
+     * readily as {@code s}, and a lenient base64url decoder ignores unused
+     * trailing bits, padding and stray characters. A replay record keyed on the
+     * whole string gave each spelling a fresh entry, so a spent token signed in
+     * again after a one-character edit.
+     *
+     * <p>The property asserted is the one that matters: no spelling is accepted
+     * a second time — it is either rejected by the validator or refused by the
+     * cache. Only {@code n−s} is required to verify, because that is ECDSA
+     * itself rather than a decoder's leniency; it keeps this test from passing
+     * on a validator that happens to reject everything.</p>
+     */
+    @Test
+    void noReSpellingOfASpentTokenIsAcceptedAgain() throws Exception {
+        ECKey ecKey = new ECKeyGenerator(Curve.P_256).keyID("ec1").generate();
+        served = new JWKSet(List.of(signingKey.toPublicJWK(), ecKey.toPublicJWK()));
+        try {
+            SignedJWT jwt = new SignedJWT(
+                    new JWSHeader.Builder(JWSAlgorithm.ES256).keyID(ecKey.getKeyID()).build(), claims().build());
+            jwt.sign(new ECDSASigner(ecKey));
+            String original = jwt.serialize();
+
+            OidcTokenValidator validator = validator();
+            ReplayCache cache = new ReplayCache();
+            long now = System.currentTimeMillis();
+            validator.validate(original);
+            assertTrue(cache.claim(original, 300_000, now), "the first use must be accepted");
+
+            Map<String, String> respellings = respellings(original);
+            assertDoesNotThrow(() -> validator.validate(respellings.get("s replaced by n - s")),
+                    "ECDSA verifies n - s; if this stops verifying, the test below proves nothing");
+            for (Map.Entry<String, String> respelled : respellings.entrySet()) {
+                String token = respelled.getValue();
+                assertNotEquals(original, token, respelled.getKey());
+                assertFalse(signsIn(validator, cache, token, now),
+                        respelled.getKey() + ": a spent token must not sign in again");
+            }
+        } finally {
+            served = new JWKSet(signingKey.toPublicJWK());   // leave the fixture as found
+        }
+    }
+
+    /**
+     * The fix rests on this: the signed part — {@code header.payload} — has
+     * exactly one spelling that verifies. Re-spell either segment the ways the
+     * signature segment can be re-spelled and the signature no longer matches.
+     * If a parser upgrade ever made one of these verify, keying on the signed
+     * part would stop being enough; this is where that would show.
+     */
+    @Test
+    void reSpellingTheSignedPartBreaksTheSignature() throws Exception {
+        OidcTokenValidator validator = validator();
+        String[] parts = sign(claims().build(), signingKey).split("\\.");
+        Map<String, String> respellings = new LinkedHashMap<>();
+        for (int segment = 0; segment < 2; segment++) {
+            String name = segment == 0 ? "header" : "payload";
+            for (Map.Entry<String, String> spelling : Map.of(
+                    "unused bits", spareBits(parts[segment]),
+                    "'=' padding", parts[segment] + "=",
+                    "'==' padding", parts[segment] + "==",
+                    "'*' appended", parts[segment] + "*").entrySet()) {
+                String[] edited = parts.clone();
+                edited[segment] = spelling.getValue();
+                respellings.put(name + " " + spelling.getKey(), String.join(".", edited));
+            }
+        }
+        ReplayCache cache = new ReplayCache();
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, String> respelled : respellings.entrySet()) {
+            assertFalse(signsIn(validator, cache, respelled.getValue(), now),
+                    respelled.getKey() + ": a re-spelled signed part must not verify");
+        }
+    }
+
+    /** Validated, then claimed — exactly the plugin's order. A refusal anywhere is not a sign-in. */
+    private static boolean signsIn(OidcTokenValidator validator, ReplayCache cache, String token, long now) {
+        try {
+            validator.validate(token);
+            return cache.claim(token, 300_000, now);
+        } catch (Exception refused) {
+            return false;
+        }
+    }
+
+    private static final String BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    /** The segment with the lowest bit of its last character flipped: unused padding bits, when it has any. */
+    private static String spareBits(String segment) {
+        int last = BASE64URL.indexOf(segment.charAt(segment.length() - 1));
+        return segment.substring(0, segment.length() - 1) + BASE64URL.charAt(last ^ 0x01);
+    }
+
+    /**
+     * Spellings of an ES256 token's signature segment that decode to — or
+     * verify as — the same signature. ES256 is R‖S, 32 bytes each: 64 bytes is
+     * 86 base64url characters, the last of which carries 4 unused bits. Plus
+     * surrounding whitespace, which the parser trims before it verifies.
+     */
+    private static Map<String, String> respellings(String token) {
+        int dot = token.lastIndexOf('.');
+        String signed = token.substring(0, dot + 1);
+        String signature = token.substring(dot + 1);
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+
+        byte[] rs = Base64.getUrlDecoder().decode(signature);
+        BigInteger n = Curve.P_256.toECParameterSpec().getOrder();
+        BigInteger s = new BigInteger(1, Arrays.copyOfRange(rs, 32, 64));
+        byte[] negated = n.subtract(s).toByteArray();
+        byte[] highS = Arrays.copyOf(rs, 64);
+        Arrays.fill(highS, 32, 64, (byte) 0);
+        int length = Math.min(32, negated.length);
+        System.arraycopy(negated, negated.length - length, highS, 64 - length, length);
+
+        Map<String, String> respellings = new LinkedHashMap<>();
+        respellings.put("s replaced by n - s", signed + encoder.encodeToString(highS));
+        respellings.put("unused trailing bits set", signed + spareBits(signature));
+        respellings.put("'=' padding appended", signed + signature + "==");
+        respellings.put("'*' appended", signed + signature + "*");
+        // Not the signature segment, but the parser trims the whole token.
+        respellings.put("leading space", " " + token);
+        respellings.put("leading tab", "\t" + token);
+        respellings.put("leading newline", "\n" + token);
+        respellings.put("trailing newline", token + "\n");
+        return respellings;
     }
 }

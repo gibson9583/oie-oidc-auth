@@ -12,6 +12,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.regex.Pattern;
 
 /**
  * Refuses an ID token that has already been spent.
@@ -40,7 +41,7 @@ final class ReplayCache {
      */
     static final int LIMIT = 10000;
 
-    /** token hash → the instant its record may be forgotten. */
+    /** hash of the token's signed content → the instant its record may be forgotten. */
     private final ConcurrentMap<String, Long> seen = new ConcurrentHashMap<>();
 
     /**
@@ -65,8 +66,39 @@ final class ReplayCache {
         if (seen.size() > LIMIT) {
             throw new SecurityException("replay cache capacity reached");
         }
-        return seen.putIfAbsent(hash(token), now + ttlMillis) == null;
+        return seen.putIfAbsent(hash(signedContent(token)), now + ttlMillis) == null;
     }
+
+    /**
+     * What a token IS, for the purpose of remembering it: the
+     * {@code header.payload} its signature covers.
+     *
+     * <p>Not the whole string. The signature segment is not covered by the
+     * signature, and it can be re-spelled while still verifying — ECDSA accepts
+     * {@code n−s} as readily as {@code s}, and the base64url decoder ignores
+     * unused trailing bits, padding and stray characters. Keyed on the whole
+     * string, every spelling was a fresh token and a spent one signed in again.</p>
+     *
+     * <p>The signed part must be canonical base64url — no whitespace, no
+     * padding, nothing outside the alphabet — or the token is refused. The
+     * parser is lenient there too: it trims, so {@code " " + token} verifies,
+     * and keying on the raw prefix would hand that spelling a record of its
+     * own. Refusing anything non-canonical, rather than mirroring what the
+     * parser happens to forgive today, means a key is always exactly the bytes
+     * the signature was checked over. No token from a real provider is
+     * refused by this.</p>
+     */
+    static String signedContent(String token) {
+        int last = token.lastIndexOf('.');
+        String signed = last < 0 ? "" : token.substring(0, last);
+        if (!CANONICAL_SIGNED_CONTENT.matcher(signed).matches()) {
+            throw new SecurityException("not a compact JWS");
+        }
+        return signed;
+    }
+
+    private static final Pattern CANONICAL_SIGNED_CONTENT =
+            Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
 
     void clear() {
         seen.clear();

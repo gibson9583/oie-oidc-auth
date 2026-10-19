@@ -389,6 +389,8 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             // would let anyone fill the cache with garbage, and the capacity
             // guard refuses logins when full. A ticket is single-use, so this is
             // the backstop for the day two tickets are issued for one token.
+            // Keyed on what the signature covers, not the string: a re-spelled
+            // signature over the same header.payload is the same token.
             if (!replays.claim(token, replayTtlMillis(config), System.currentTimeMillis())) {
                 return fail("SSO assertion was already used.");
             }
