@@ -1,5 +1,7 @@
 # OIDC Authentication
 
+Engine compatibility for the prepared 1.0.3 release: **OIE 4.6.0 and 4.7.0 only**. See the [release preparation notes](oie-4.6-4.7-release.md) for validation status.
+
 Adds generic OpenID Connect SSO to the web administrator while preserving named-user engine audit attribution. Supports discovery/JWKS validation, JIT provisioning, durable subject binding, local-login fallback, and optional RBAC role mapping.
 
 Requires OIE 4.6.0 and the OIE web administrator 0.9.0 or newer.

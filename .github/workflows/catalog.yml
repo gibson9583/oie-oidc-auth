@@ -1,0 +1,48 @@
+name: Catalog PR
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    secrets:
+      CATALOG_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to submit to the catalog
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  configuration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      available: ${{ steps.token.outputs.available }}
+    steps:
+      - name: Check catalog publishing configuration
+        id: token
+        env:
+          CATALOG_TOKEN: ${{ secrets.CATALOG_TOKEN }}
+        run: |
+          if [ -n "$CATALOG_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Catalog publication skipped: configure CATALOG_TOKEN, then run Catalog PR for this tag."
+            echo "Catalog publication skipped because CATALOG_TOKEN is not configured. Add a fine-grained token with Contents and Pull requests read/write access to gibson9583/oie-community-catalog as the OIDC repository's CATALOG_TOKEN Actions secret, then run Catalog PR for the published tag. The catalog entry can also be published manually using the signed ZIP's SHA-256." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  publish:
+    needs: configuration
+    if: needs.configuration.outputs.available == 'true'
+    uses: gibson9583/oie-community-catalog/.github/workflows/publish-to-catalog.yml@cf37fe83196c40cd3adc9e9b2db644b81fd424e6
+    with:
+      tag: ${{ inputs.tag }}
+    secrets:
+      CATALOG_TOKEN: ${{ secrets.CATALOG_TOKEN }}

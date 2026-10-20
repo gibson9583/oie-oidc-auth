@@ -1,5 +1,7 @@
 # OIE OIDC Authentication
 
+Release 1.0.3 is being prepared with engine compatibility limited to OIE **4.6.0 and 4.7.0**. Runtime validation on the final 4.7.0 release is pending; see the [release preparation notes](docs/oie-4.6-4.7-release.md).
+
 This extension adds OpenID Connect single sign-on to the OIE web administrator. It runs on the engine. It sends the browser to the identity provider and exchanges the authorization code. It validates the ID token and signs the user in as a named engine user. It can create engine users on first sign-in, and it can assign RBAC roles from provider claims.
 
 **Documentation:** the [wiki](https://github.com/gibson9583/oie-oidc-auth/wiki) has installation and configuration walkthroughs with screenshots, provider guides for Keycloak, Microsoft Entra ID, Okta, and AWS Cognito, and a troubleshooting page. This README is the reference.
