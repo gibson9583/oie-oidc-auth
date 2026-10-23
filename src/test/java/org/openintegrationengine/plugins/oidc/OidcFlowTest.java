@@ -38,6 +38,7 @@ import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 /**
@@ -69,11 +70,15 @@ class OidcFlowTest {
         String endpoints = "\"issuer\":\"" + base + "\",\"jwks_uri\":\"" + base + "/jwks\",\"authorization_endpoint\":\"" + base
                 + "/authorize\",\"token_endpoint\":\"" + base + "/token\"";
         server.createContext("/.well-known/openid-configuration", exchange -> respond(exchange, 200, "{" + endpoints + "}"));
-        // The same provider, describing itself as taking the secret in the body only.
+        // A second provider on the same keys, taking the secret in the body only.
+        // Its own issuer, as discovery requires of a document under its own path.
+        String postOnly = base + "/post-only";
         server.createContext("/post-only/.well-known/openid-configuration", exchange -> respond(exchange, 200,
-                "{" + endpoints + ",\"token_endpoint_auth_methods_supported\":[\"client_secret_post\"]}"));
+                "{\"issuer\":\"" + postOnly + "\",\"jwks_uri\":\"" + base + "/jwks\",\"authorization_endpoint\":\""
+                        + base + "/authorize\",\"token_endpoint\":\"" + postOnly + "/token\","
+                        + "\"token_endpoint_auth_methods_supported\":[\"client_secret_post\"]}"));
         server.createContext("/jwks", exchange -> respond(exchange, 200, new JWKSet(key.toPublicJWK()).toString()));
-        server.createContext("/token", exchange -> {
+        HttpHandler token = exchange -> {
             Map<String, String> form = new HashMap<>();
             for (String pair : new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8).split("&")) {
                 int eq = pair.indexOf('=');
@@ -101,7 +106,8 @@ class OidcFlowTest {
                 return;
             }
             try {
-                JWTClaimsSet claims = new JWTClaimsSet.Builder().issuer(base).audience("client").subject("subject-1")
+                JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                        .issuer(exchange.getRequestURI().getPath().startsWith("/post-only/") ? base + "/post-only" : base).audience("client").subject("subject-1")
                         .claim("nonce", nonceOverride != null ? nonceOverride : nonce.get())
                         .claim("preferred_username", "jdoe").issueTime(new Date())
                         .expirationTime(new Date(System.currentTimeMillis() + 300_000)).build();
@@ -111,7 +117,9 @@ class OidcFlowTest {
             } catch (Exception e) {
                 respond(exchange, 500, "{\"error\":\"" + e + "\"}");
             }
-        });
+        };
+        server.createContext("/token", token);
+        server.createContext("/post-only/token", token);
         server.start();
     }
 

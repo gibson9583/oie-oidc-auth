@@ -6,6 +6,7 @@
 
 package org.openintegrationengine.plugins.oidc;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -148,6 +149,45 @@ class DiscoveryClientTest {
         discoveryBody = "{\"issuer\":\"" + base + "\"}";
         DiscoveryClient client = new DiscoveryClient();
         assertThrows(Exception.class, () -> client.get(config(0)));
+    }
+
+    /**
+     * Discovery §4.3: the issuer a document reports must be the URL it was
+     * fetched under. A document claiming another issuer is refused, before
+     * any token is checked against that issuer.
+     */
+    @Test
+    void refusesADiscoveryDocumentNamingAnotherIssuer() {
+        discoveryBody = "{\"issuer\":\"https://evil.example\",\"jwks_uri\":\"" + base + "/jwks\"}";
+        DiscoveryClient client = new DiscoveryClient();
+        Exception refused = assertThrows(Exception.class, () -> client.get(config(0)));
+        assertTrue(refused.getMessage().contains("does not match the discovery URL"), refused.getMessage());
+        assertNull(client.cachedIssuer(), "a refused document is not cached");
+    }
+
+    /** The URL shapes real providers use, and the near misses. */
+    @Test
+    void theIssuerMustBeTheDiscoveryUrlWithoutTheWellKnownSuffix() {
+        String suffix = DiscoveryClient.WELL_KNOWN_SUFFIX;
+        // Keycloak: the realm path is part of the issuer.
+        assertDoesNotThrow(() -> DiscoveryClient.requireIssuerMatchesDiscoveryUrl(
+                "https://kc.example/realms/main", "https://kc.example/realms/main" + suffix));
+        // Auth0: the issuer ends in a slash; §4 drops it before appending the suffix.
+        assertDoesNotThrow(() -> DiscoveryClient.requireIssuerMatchesDiscoveryUrl(
+                "https://tenant.auth0.com/", "https://tenant.auth0.com" + suffix));
+        // A query string is not part of the Issuer URL.
+        assertDoesNotThrow(() -> DiscoveryClient.requireIssuerMatchesDiscoveryUrl(
+                "https://idp.example/tenant", "https://idp.example/tenant" + suffix + "?appid=1"));
+
+        assertThrows(IOException.class, () -> DiscoveryClient.requireIssuerMatchesDiscoveryUrl(
+                "https://kc.example/realms/other", "https://kc.example/realms/main" + suffix),
+                "another realm on the same host is another issuer");
+        assertThrows(IOException.class, () -> DiscoveryClient.requireIssuerMatchesDiscoveryUrl(
+                "https://kc.example/realms/main", "https://kc.example:8443/realms/main" + suffix),
+                "another port is another issuer");
+        assertThrows(IOException.class, () -> DiscoveryClient.requireIssuerMatchesDiscoveryUrl(
+                "https://kc.example/realms/main", "https://kc.example/realms/main/openid-configuration"),
+                "a URL that is not a discovery URL has no issuer to compare");
     }
 
     /**

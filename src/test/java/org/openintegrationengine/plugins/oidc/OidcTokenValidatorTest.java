@@ -30,6 +30,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.ECDSASigner;
@@ -98,6 +99,10 @@ class OidcTokenValidatorTest {
     }
 
     private static OidcTokenValidator validator() {
+        return new OidcTokenValidator(OidcConfig.from(policy()), new DiscoveryClient());
+    }
+
+    private static Properties policy() {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
         p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
@@ -105,7 +110,7 @@ class OidcTokenValidatorTest {
         p.setProperty("roles.default", "Viewer");   // required whenever RBAC is on the classpath
         p.setProperty("discovery-url", base + "/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
-        return new OidcTokenValidator(OidcConfig.from(p), new DiscoveryClient());
+        return p;
     }
 
     private static JWTClaimsSet.Builder claims() {
@@ -116,7 +121,13 @@ class OidcTokenValidatorTest {
     }
 
     private static String sign(JWTClaimsSet claims, RSAKey key) throws Exception {
-        SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(), claims);
+        return sign(claims, key, null);
+    }
+
+    /** With a header {@code typ}; null for none. */
+    private static String sign(JWTClaimsSet claims, RSAKey key, String type) throws Exception {
+        SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID())
+                .type(type == null ? null : new JOSEObjectType(type)).build(), claims);
         jwt.sign(new RSASSASigner(key));
         return jwt.serialize();
     }
@@ -159,6 +170,131 @@ class OidcTokenValidatorTest {
         assertEquals("subject-1", validator().validate(sign(good, signingKey)).getSubject());
         JWTClaimsSet bad = claims().audience(List.of("client", "other")).claim("azp", "other").build();
         assertThrows(Exception.class, () -> validator().validate(sign(bad, signingKey)));
+    }
+
+    /**
+     * OIDC Core 3.1.3.7 item 5: an azp that is present must be this client,
+     * even with a single audience. On every path, so a ticket's token too.
+     */
+    @Test
+    void aTokenIssuedToAnotherPartyIsRejected() throws Exception {
+        assertThrows(Exception.class,
+                () -> validator().validate(sign(claims().claim("azp", "other-app").build(), signingKey)));
+        assertDoesNotThrow(() -> validator().validate(sign(claims().claim("azp", "client").build(), signingKey)));
+    }
+
+    /* ---- a jwt: credential is a JWT grant for this engine (RFC 7523) ---- */
+
+    private static final String ENGINE = "https://engine.example";
+
+    private static OidcTokenValidator grantValidator() {
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        p.setProperty("jwt.audience", ENGINE);
+        return new OidcTokenValidator(OidcConfig.from(p), new DiscoveryClient());
+    }
+
+    private static JWTClaimsSet.Builder grant() {
+        Date now = new Date();
+        return new JWTClaimsSet.Builder()
+                .issuer(issuer).audience(ENGINE).subject("subject-1").jwtID("grant-1")
+                .issueTime(now).expirationTime(new Date(now.getTime() + 120_000));
+    }
+
+    @Test
+    void acceptsAGrantAddressedToThisEngine() throws Exception {
+        assertEquals("grant-1", grantValidator().validateGrant(sign(grant().build(), signingKey)).getJWTID());
+        assertDoesNotThrow(() -> grantValidator().validateGrant(sign(grant().build(), signingKey, "JWT")));
+    }
+
+    /**
+     * The point of the separate audience: an ID token from an ordinary
+     * sign-in names the client, not this engine, so it is not a password.
+     * And a grant is not an ID token.
+     */
+    @Test
+    void anIdTokenIsNotAGrantAndAGrantIsNotAnIdToken() throws Exception {
+        String idToken = sign(claims().jwtID("id-1").build(), signingKey);
+        assertDoesNotThrow(() -> grantValidator().validate(idToken));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(idToken));
+        assertThrows(Exception.class, () -> grantValidator().validate(sign(grant().build(), signingKey)));
+    }
+
+    @Test
+    void aGrantForAnotherEngineIsRejected() {
+        assertThrows(Exception.class, () -> grantValidator()
+                .validateGrant(sign(grant().audience("https://other-engine.example").build(), signingKey)));
+    }
+
+    @Test
+    void aGrantWithoutAJtiIsRejected() {
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().jwtID(null).build(), signingKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().jwtID(" ").build(), signingKey)));
+    }
+
+    /** exp − iat is capped by jwt.max-lifetime-seconds (120 by default). */
+    @Test
+    void aGrantLivingLongerThanTheMaximumIsRejected() throws Exception {
+        Date now = new Date();
+        String atLimit = sign(grant().issueTime(now).expirationTime(new Date(now.getTime() + 120_000)).build(), signingKey);
+        String over = sign(grant().issueTime(now).expirationTime(new Date(now.getTime() + 121_000)).build(), signingKey);
+        assertDoesNotThrow(() -> grantValidator().validateGrant(atLimit));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(over));
+    }
+
+    @Test
+    void aGrantStillNeedsTheProvidersSignatureAndIssuer() {
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().build(), rogueKey)));
+        assertThrows(Exception.class, () -> grantValidator()
+                .validateGrant(sign(grant().issuer("https://evil.example").build(), signingKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().build(), signingKey, "at+jwt")));
+    }
+
+    /** RFC 9068 access tokens say so in the header, in either spelling, and no path accepts them. */
+    @Test
+    void aTokenTypedAsAnAccessTokenIsRejected() {
+        assertThrows(Exception.class, () -> validator().validate(sign(claims().build(), signingKey, "at+jwt")));
+        assertThrows(Exception.class,
+                () -> validator().validate(sign(claims().build(), signingKey, "application/AT+JWT")));
+    }
+
+    /* ---- the acceptance window, which the replay cache also uses --------- */
+
+    private static final long NOW = 1_700_000_000_000L;
+
+    private static OidcConfig ageAndSkew(String maxAge, String skew) {
+        Properties p = policy();
+        p.setProperty("max-token-age-seconds", maxAge);
+        p.setProperty("clock-skew-seconds", skew);
+        return OidcConfig.from(p);
+    }
+
+    private static JWTClaimsSet issuedAt(long iat, long exp) {
+        return new JWTClaimsSet.Builder().issueTime(new Date(iat)).expirationTime(new Date(exp)).build();
+    }
+
+    /**
+     * iat may be up to skew in the future. With the provider's clock 60 s
+     * ahead, a token used now is accepted until iat + maxAge + skew, 420 s
+     * from now, not maxAge + skew from its use.
+     */
+    @Test
+    void aTokenFromAProviderClockRunningAheadIsAcceptedUntilIatPlusMaxAgePlusSkew() {
+        assertEquals(NOW + 420_000L,
+                OidcTokenValidator.acceptedUntilMillis(issuedAt(NOW + 60_000, NOW + 3_600_000), ageAndSkew("300", "60")));
+    }
+
+    @Test
+    void aShortLivedTokenIsAcceptedUntilItsExpiryPlusSkew() {
+        assertEquals(NOW + 180_000L,
+                OidcTokenValidator.acceptedUntilMillis(issuedAt(NOW, NOW + 120_000), ageAndSkew("300", "60")));
+    }
+
+    @Test
+    void anOlderTokenIsAcceptedOnlyForWhatIsLeftOfItsWindow() {
+        JWTClaimsSet older = issuedAt(NOW - 200_000, NOW + 3_600_000);
+        assertEquals(NOW + 160_000L, OidcTokenValidator.acceptedUntilMillis(older, ageAndSkew("300", "60")));
+        assertEquals(NOW + 100_000L, OidcTokenValidator.acceptedUntilMillis(older, ageAndSkew("300", "0")));
     }
 
     @Test
@@ -275,7 +411,7 @@ class OidcTokenValidatorTest {
             ReplayCache cache = new ReplayCache();
             long now = System.currentTimeMillis();
             validator.validate(original);
-            assertTrue(cache.claim(original, 300_000, now), "the first use must be accepted");
+            assertTrue(cache.claim(original, now + 300_000, now), "the first use must be accepted");
 
             Map<String, String> respellings = respellings(original);
             assertDoesNotThrow(() -> validator.validate(respellings.get("s replaced by n - s")),
@@ -327,7 +463,7 @@ class OidcTokenValidatorTest {
     private static boolean signsIn(OidcTokenValidator validator, ReplayCache cache, String token, long now) {
         try {
             validator.validate(token);
-            return cache.claim(token, 300_000, now);
+            return cache.claim(token, now + 300_000, now);
         } catch (Exception refused) {
             return false;
         }

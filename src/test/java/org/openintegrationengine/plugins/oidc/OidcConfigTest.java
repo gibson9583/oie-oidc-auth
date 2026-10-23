@@ -7,6 +7,7 @@
 package org.openintegrationengine.plugins.oidc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -52,7 +53,38 @@ class OidcConfigTest {
 
         Properties on = enabled();
         on.setProperty("jwt.enabled", "true");
-        assertTrue(OidcConfig.from(on).jwtEnabled());
+        on.setProperty("jwt.audience", "https://engine.example");
+        OidcConfig config = OidcConfig.from(on);
+        assertTrue(config.jwtEnabled());
+        assertEquals("https://engine.example", config.jwtAudience());
+        assertEquals(120, config.jwtMaxLifetimeSeconds());
+    }
+
+    /**
+     * jwt: needs an audience of its own. Without one, or with the client id,
+     * every ID token issued to the client would be accepted as a password.
+     */
+    @Test
+    void directJwtPresentationNeedsAnAudienceOtherThanTheClientId() {
+        Properties missing = enabled();
+        missing.setProperty("jwt.enabled", "true");
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(missing))
+                .getMessage().contains("jwt.audience is required"));
+
+        Properties clientId = enabled();
+        clientId.setProperty("jwt.enabled", "true");
+        clientId.setProperty("jwt.audience", clientId.getProperty("client-id"));
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(clientId))
+                .getMessage().contains("must differ from client-id"));
+
+        Properties zero = enabled();
+        zero.setProperty("jwt.enabled", "true");
+        zero.setProperty("jwt.audience", "https://engine.example");
+        zero.setProperty("jwt.max-lifetime-seconds", "0");
+        assertThrows(IllegalArgumentException.class, () -> OidcConfig.from(zero));
+
+        // Off, nothing is required.
+        assertDoesNotThrow(() -> OidcConfig.from(enabled()));
     }
 
     @Test

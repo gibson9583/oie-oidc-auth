@@ -43,15 +43,29 @@ class ReplayCacheTest {
     @Test
     void aTokenIsTheSameTokenWhateverItsSignatureSegmentSays() {
         long now = 1_000_000;
-        assertTrue(cache.claim("header.payload.sigA", TTL, now));
-        assertFalse(cache.claim("header.payload.sigB", TTL, now),
+        assertTrue(cache.claim("header.payload.sigA", now + TTL, now));
+        assertFalse(cache.claim("header.payload.sigB", now + TTL, now),
                 "a re-spelled signature over the same header.payload is a replay");
-        assertFalse(cache.claim("header.payload.sigA==", TTL, now), "padding is still the same token");
-        assertFalse(cache.claim("header.payload.", TTL, now), "an empty signature segment too");
+        assertFalse(cache.claim("header.payload.sigA==", now + TTL, now), "padding is still the same token");
+        assertFalse(cache.claim("header.payload.", now + TTL, now), "an empty signature segment too");
 
         // What the signature covers still distinguishes tokens.
-        assertTrue(cache.claim("header.other.sigA", TTL, now), "a different payload is a different token");
-        assertTrue(cache.claim("other.payload.sigA", TTL, now), "a different header is a different token");
+        assertTrue(cache.claim("header.other.sigA", now + TTL, now), "a different payload is a different token");
+        assertTrue(cache.claim("other.payload.sigA", now + TTL, now), "a different header is a different token");
+    }
+
+    /**
+     * A JWT grant is spent by its issuer and jti, whatever token carries them,
+     * and that record never collides with a token's signed-content record.
+     */
+    @Test
+    void aGrantIsSpentByItsIssuerAndJti() {
+        long now = 1_000_000;
+        assertTrue(cache.claimId("https://issuer", "grant-1", now + TTL, now));
+        assertFalse(cache.claimId("https://issuer", "grant-1", now + TTL, now), "the same jti is a replay");
+        assertTrue(cache.claimId("https://issuer", "grant-2", now + TTL, now), "another jti is another grant");
+        assertTrue(cache.claimId("https://other-issuer", "grant-1", now + TTL, now), "jti is unique per issuer");
+        assertTrue(cache.claim(jws("grant-1"), now + TTL, now), "content and jti records are separate");
     }
 
     /**
@@ -63,9 +77,9 @@ class ReplayCacheTest {
     @Test
     void refusesAStringThatIsNotACompactJws() {
         long now = 1_000_000;
-        assertThrows(SecurityException.class, () -> cache.claim("no-dots", TTL, now));
-        assertThrows(SecurityException.class, () -> cache.claim("header.payload", TTL, now));
-        assertThrows(SecurityException.class, () -> cache.claim("a.b.c.d.e", TTL, now), "JWE is five segments");
+        assertThrows(SecurityException.class, () -> cache.claim("no-dots", now + TTL, now));
+        assertThrows(SecurityException.class, () -> cache.claim("header.payload", now + TTL, now));
+        assertThrows(SecurityException.class, () -> cache.claim("a.b.c.d.e", now + TTL, now), "JWE is five segments");
     }
 
     /**
@@ -78,12 +92,12 @@ class ReplayCacheTest {
     @Test
     void refusesASignedPartThatIsNotCanonicalBase64Url() {
         long now = 1_000_000;
-        assertTrue(cache.claim("header.payload.sig", TTL, now));
+        assertTrue(cache.claim("header.payload.sig", now + TTL, now));
         for (String respelled : new String[] {
                 " header.payload.sig", "\theader.payload.sig", "\nheader.payload.sig",
                 "header.payload=.sig", "header=.payload.sig", "header.pay load.sig", "header.payload*.sig",
                 "\u00a0header.payload.sig", ".payload.sig", "header..sig"}) {
-            assertThrows(SecurityException.class, () -> cache.claim(respelled, TTL, now),
+            assertThrows(SecurityException.class, () -> cache.claim(respelled, now + TTL, now),
                     () -> "must refuse " + respelled.replace("\t", "\\t").replace("\n", "\\n"));
         }
     }
@@ -91,11 +105,11 @@ class ReplayCacheTest {
     @Test
     void refusesATokenPresentedTwice() {
         long now = 1_000_000;
-        assertTrue(cache.claim(jws("token"), TTL, now), "the first use must be accepted");
-        assertFalse(cache.claim(jws("token"), TTL, now), "the second use must be refused");
-        assertFalse(cache.claim(jws("token"), TTL, now + 1000), "and still refused a second later");
+        assertTrue(cache.claim(jws("token"), now + TTL, now), "the first use must be accepted");
+        assertFalse(cache.claim(jws("token"), now + TTL, now), "the second use must be refused");
+        assertFalse(cache.claim(jws("token"), now + 1000 + TTL, now + 1000), "and still refused a second later");
         // A different token is unaffected.
-        assertTrue(cache.claim(jws("another"), TTL, now));
+        assertTrue(cache.claim(jws("another"), now + TTL, now));
     }
 
     /**
@@ -107,11 +121,11 @@ class ReplayCacheTest {
     @Test
     void remembersForExactlyAsLongAsTheTokenCouldStillBeUsed() {
         long now = 1_000_000;
-        assertTrue(cache.claim(jws("token"), TTL, now));
-        assertFalse(cache.claim(jws("token"), TTL, now + TTL - 1), "still within the token's life — must be refused");
+        assertTrue(cache.claim(jws("token"), now + TTL, now));
+        assertFalse(cache.claim(jws("token"), now + TTL - 1 + TTL, now + TTL - 1), "still within the token's life — must be refused");
         // Past its expiry the record may go: the token itself no longer validates,
         // so the cache is not what is stopping it.
-        assertTrue(cache.claim(jws("token"), TTL, now + TTL + 1));
+        assertTrue(cache.claim(jws("token"), now + TTL + 1 + TTL, now + TTL + 1));
     }
 
     /**
@@ -126,22 +140,22 @@ class ReplayCacheTest {
     @Test
     void refusesRatherThanEvictingWhenFull() {
         long now = 1_000_000;
-        assertTrue(cache.claim(jws("the-captured-token"), TTL, now));
+        assertTrue(cache.claim(jws("the-captured-token"), now + TTL, now));
         // Fill until the bound bites. It refuses partway through, which is the
         // behaviour under test — so stop there rather than letting the fill fail
         // the test on the guard working.
         for (int i = 0; i <= ReplayCache.LIMIT; i++) {
             try {
-                cache.claim(jws("filler-" + i), TTL, now);
+                cache.claim(jws("filler-" + i), now + TTL, now);
             } catch (SecurityException full) {
                 break;
             }
         }
         // The captured token must NOT become claimable again. An eviction policy
         // would have dropped its record and this would return true — a replay.
-        assertThrows(SecurityException.class, () -> cache.claim(jws("the-captured-token"), TTL, now),
+        assertThrows(SecurityException.class, () -> cache.claim(jws("the-captured-token"), now + TTL, now),
                 "a full cache must refuse, never forget a record and accept a replay");
-        assertThrows(SecurityException.class, () -> cache.claim(jws("anything-else"), TTL, now));
+        assertThrows(SecurityException.class, () -> cache.claim(jws("anything-else"), now + TTL, now));
     }
 
     /**
@@ -154,14 +168,14 @@ class ReplayCacheTest {
         long now = 1_000_000;
         for (int i = 0; i <= ReplayCache.LIMIT; i++) {
             try {
-                cache.claim(jws("old-" + i), TTL, now);
+                cache.claim(jws("old-" + i), now + TTL, now);
             } catch (SecurityException full) {
                 break;
             }
         }
         // Every one of those has since expired, so there is room again.
         long later = now + TTL + 1;
-        assertTrue(cache.claim(jws("a-fresh-login"), TTL, later),
+        assertTrue(cache.claim(jws("a-fresh-login"), later + TTL, later),
                 "a cache holding only expired records must accept a new token");
     }
 

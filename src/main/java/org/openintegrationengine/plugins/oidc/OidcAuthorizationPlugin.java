@@ -38,12 +38,13 @@ import com.nimbusds.jwt.JWTClaimsSet;
  * JIT-provisions when configured, syncs the RBAC role, and answers with the
  * derived username so the session — and every audited event — belongs to the
  * real named user.
- * A token the same provider minted may also be presented directly as
- * {@code password=oidc:jwt:<jwt>}, but only when {@code jwt.enabled} is
- * true. It is checked by the same validator (discovery issuer, client-id
- * audience, JWKS, lifetime) and then follows the same account path. It has
- * no nonce, because it did not come from {@code /start}, which is why the
- * policy leaves it off. Anything else presented as an {@code oidc:}
+ * A JWT authorization grant (RFC 7523) the same provider minted may also be
+ * presented directly as {@code password=oidc:jwt:<jwt>}, but only when
+ * {@code jwt.enabled} is true. It is checked for the discovery issuer and
+ * JWKS like an ID token, but its audience must be {@code jwt.audience}, this
+ * engine alone and never the client id, it must carry a {@code jti}, which is
+ * spent once, and it may live at most {@code jwt.max-lifetime-seconds}. It
+ * then follows the same account path. Anything else presented as an {@code oidc:}
  * password, including a raw ID token and a {@code jwt:} credential while
  * the flag is off, is refused unread.
  *
@@ -328,20 +329,9 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         this.startedAt = millis;
     }
 
-    /**
-     * How long a spent token must be remembered: as long as the validator
-     * would still accept it. The freshness window is
-     * {@code iat >= now - (maxAge + skew)}, so a record kept for {@code maxAge}
-     * alone left the final {@code skew} seconds of a token's life replayable.
-     */
-    static long replayTtlMillis(OidcConfig config) {
-        return (config.maxTokenAgeSeconds() + config.clockSkewSeconds()) * 1000L;
-    }
-
     /** Whether a token's {@code iat} falls before this instance's replay memory, skew included. */
     private boolean issuedBeforeStart(JWTClaimsSet claims, OidcConfig config) {
-        return claims.getIssueTime() == null
-                || claims.getIssueTime().getTime() < startedAt + config.clockSkewSeconds() * 1000L;
+        return claims.getIssueTime().getTime() < startedAt + config.clockSkewSeconds() * 1000L;
     }
 
     private boolean disabled() {
@@ -372,8 +362,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 if (!config.jwtEnabled()) {
                     return fail("SSO sign-in was rejected.");
                 }
-                // A token minted by the configured provider, presented directly.
-                // Same validator as an ID token behind a ticket.
+                // A JWT grant minted by the configured provider for this engine.
                 token = credential.substring(JWT_PREFIX.length());
                 if (token.isEmpty()) {
                     return fail("SSO sign-in was rejected.");
@@ -396,41 +385,31 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 // a guess to exercise. The jwt: prefix is the explicit presentation.
                 return fail("SSO sign-in was rejected.");
             }
-            JWTClaimsSet claims = validator.validate(token);
-            // The replay cache lives in memory and starts empty with this
-            // instance, so a jwt: token issued before then may already have been
-            // spent on an earlier run. Refuse it rather than assume it was not.
-            // The skew covers a provider clock running behind, which can stamp
-            // a pre-restart token a little after startedAt. A ticket needs no
-            // such check: the browser never supplies the token behind one. The
-            // callback fetched it from the provider's token endpoint with a
-            // single-use code, PKCE verifier and client secret, so no spent
-            // token can be fed in, and tickets do not survive a restart.
+            JWTClaimsSet claims = direct ? validator.validateGrant(token) : validator.validate(token);
+            // The replay memory is in memory and starts empty with this
+            // instance, so a grant issued before then may have been spent on
+            // an earlier run. The skew covers a provider clock running behind.
+            // Tickets are exempt: the callback fetched their token with a
+            // single-use code, and tickets do not survive a restart.
             if (direct && issuedBeforeStart(claims, config)) {
-                log.debug("OIDC login rejected: the jwt: token was issued before this engine's replay memory began");
+                log.debug("OIDC login rejected: the jwt: grant was issued before this engine's replay memory began");
                 return fail("SSO sign-in was rejected.");
             }
-            // Only AFTER the token proves valid: recording an unverified string
-            // would let anyone fill the cache with garbage, and the capacity
-            // guard refuses logins when full. A ticket is single-use, so this is
-            // the backstop for the day two tickets are issued for one token.
-            // Keyed on what the signature covers, not the string: a re-spelled
-            // signature over the same header.payload is the same token.
-            if (!replays.claim(token, replayTtlMillis(config), System.currentTimeMillis())) {
+            // Recorded only after validation, so garbage cannot fill the cache.
+            // A grant by its jti; an ID token by its signed content.
+            long now = System.currentTimeMillis();
+            long keepUntil = OidcTokenValidator.acceptedUntilMillis(claims, config);
+            boolean firstUse = direct
+                    ? replays.claimId(claims.getIssuer(), claims.getJWTID(), keepUntil, now)
+                    : replays.claim(token, keepUntil, now);
+            if (!firstUse) {
                 return fail("SSO assertion was already used.");
             }
 
             ClaimsMapper.Identity identity = mapper.map(claims, config);
-            // The submitted username must BE the token's user. The engine's
-            // HTTP Basic path (every REST endpoint) splits the header at the
-            // first colon, authorizes, and then runs the request as the
-            // SUBMITTED name; it never reads the updated username returned
-            // below. Without this check, Basic "admin:oidc:ticket:<id>" with a
-            // ticket from one's own sign-in ran as admin. Exact and
-            // case-sensitive: the mapped name is already normalized, and a
-            // looser match could let a case-insensitive lookup resolve a
-            // different account. Checked before provisioning, so a mismatch
-            // creates no account and changes no role; the token stays spent.
+            // The engine's HTTP Basic path runs the request as the SUBMITTED
+            // name, not the one returned below (see the class javadoc), so it
+            // must be the token's user, exactly. Checked before provisioning.
             if (!identity.username().equals(username)) {
                 log.warn("OIDC login rejected: the submitted username does not match the token's user '{}'",
                         identity.username());

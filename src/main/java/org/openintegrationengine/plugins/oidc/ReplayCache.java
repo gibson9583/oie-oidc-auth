@@ -15,7 +15,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Pattern;
 
 /**
- * Refuses an ID token that has already been spent.
+ * Refuses a token that has already been spent: an ID token by its signed
+ * content, a JWT grant by its {@code jti}.
  *
  * <p>A valid ID token stays cryptographically valid until it expires, so
  * anything that captures one — a proxy log, a shared browser, an
@@ -41,7 +42,11 @@ final class ReplayCache {
      */
     static final int LIMIT = 10000;
 
-    /** hash of the token's signed content → the instant its record may be forgotten. */
+    /** Two non-empty base64url segments, nothing else. */
+    private static final Pattern CANONICAL_SIGNED_CONTENT =
+            Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
+
+    /** hash of a token's signed content, or of a grant's issuer and jti → when its record may be forgotten. */
     private final ConcurrentMap<String, Long> seen = new ConcurrentHashMap<>();
 
     /**
@@ -53,12 +58,25 @@ final class ReplayCache {
      * genuinely useful to whoever is signing in; a full cache is not their
      * problem to solve, so that one throws and reaches the generic refusal.</p>
      *
-     * @param ttlMillis how long the record must outlive this call — the token's
-     *                  own remaining validity, so a record is never dropped
-     *                  while the token it describes could still be presented
+     * @param keepUntil when the record may be forgotten: the last instant the
+     *                  token is accepted, so a record is never dropped while
+     *                  the token it describes could still be presented
      * @return true if this is the token's first use
      */
-    boolean claim(String token, long ttlMillis, long now) {
+    boolean claim(String token, long keepUntil, long now) {
+        return record("content:" + signedContent(token), keepUntil, now);
+    }
+
+    /**
+     * Records a JWT grant as spent by its issuer and {@code jti} (RFC 7523
+     * §3, item 7). The jti is the grant's identity, so a re-signed or
+     * re-spelled copy is the same grant.
+     */
+    boolean claimId(String issuer, String jti, long keepUntil, long now) {
+        return record("jti:" + issuer + "#" + jti, keepUntil, now);
+    }
+
+    private boolean record(String key, long keepUntil, long now) {
         // Sweep first: expired records are not evidence, and clearing them is
         // what keeps the capacity check below measuring live pressure rather
         // than accumulated history.
@@ -66,7 +84,7 @@ final class ReplayCache {
         if (seen.size() > LIMIT) {
             throw new SecurityException("replay cache capacity reached");
         }
-        return seen.putIfAbsent(hash(signedContent(token)), now + ttlMillis) == null;
+        return seen.putIfAbsent(hash(key), keepUntil) == null;
     }
 
     /**
@@ -96,9 +114,6 @@ final class ReplayCache {
         }
         return signed;
     }
-
-    private static final Pattern CANONICAL_SIGNED_CONTENT =
-            Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
 
     /**
      * A truncated SHA-256, so a heap dump or a debugger does not hand out live
