@@ -6,15 +6,23 @@
 
 package org.openintegrationengine.plugins.oidc;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.OutputStream;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -22,12 +30,17 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.ECDSASigner;
 import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.Curve;
+import com.nimbusds.jose.jwk.ECKey;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.gen.ECKeyGenerator;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
@@ -86,6 +99,10 @@ class OidcTokenValidatorTest {
     }
 
     private static OidcTokenValidator validator() {
+        return new OidcTokenValidator(OidcConfig.from(policy()), new DiscoveryClient());
+    }
+
+    private static Properties policy() {
         Properties p = new Properties();
         p.setProperty("enabled", "true");
         p.setProperty("client-secret", "test-client-secret");   // required when enabled: the engine runs the flow
@@ -93,7 +110,7 @@ class OidcTokenValidatorTest {
         p.setProperty("roles.default", "Viewer");   // required whenever RBAC is on the classpath
         p.setProperty("discovery-url", base + "/.well-known/openid-configuration");
         p.setProperty("client-id", "client");
-        return new OidcTokenValidator(OidcConfig.from(p), new DiscoveryClient());
+        return p;
     }
 
     private static JWTClaimsSet.Builder claims() {
@@ -104,7 +121,13 @@ class OidcTokenValidatorTest {
     }
 
     private static String sign(JWTClaimsSet claims, RSAKey key) throws Exception {
-        SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(), claims);
+        return sign(claims, key, null);
+    }
+
+    /** With a header {@code typ}; null for none. */
+    private static String sign(JWTClaimsSet claims, RSAKey key, String type) throws Exception {
+        SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID())
+                .type(type == null ? null : new JOSEObjectType(type)).build(), claims);
         jwt.sign(new RSASSASigner(key));
         return jwt.serialize();
     }
@@ -147,6 +170,131 @@ class OidcTokenValidatorTest {
         assertEquals("subject-1", validator().validate(sign(good, signingKey)).getSubject());
         JWTClaimsSet bad = claims().audience(List.of("client", "other")).claim("azp", "other").build();
         assertThrows(Exception.class, () -> validator().validate(sign(bad, signingKey)));
+    }
+
+    /**
+     * OIDC Core 3.1.3.7 item 5: an azp that is present must be this client,
+     * even with a single audience. On every path, so a ticket's token too.
+     */
+    @Test
+    void aTokenIssuedToAnotherPartyIsRejected() throws Exception {
+        assertThrows(Exception.class,
+                () -> validator().validate(sign(claims().claim("azp", "other-app").build(), signingKey)));
+        assertDoesNotThrow(() -> validator().validate(sign(claims().claim("azp", "client").build(), signingKey)));
+    }
+
+    /* ---- a jwt: credential is a JWT grant for this engine (RFC 7523) ---- */
+
+    private static final String ENGINE = "https://engine.example";
+
+    private static OidcTokenValidator grantValidator() {
+        Properties p = policy();
+        p.setProperty("jwt.enabled", "true");
+        p.setProperty("jwt.audience", ENGINE);
+        return new OidcTokenValidator(OidcConfig.from(p), new DiscoveryClient());
+    }
+
+    private static JWTClaimsSet.Builder grant() {
+        Date now = new Date();
+        return new JWTClaimsSet.Builder()
+                .issuer(issuer).audience(ENGINE).subject("subject-1").jwtID("grant-1")
+                .issueTime(now).expirationTime(new Date(now.getTime() + 120_000));
+    }
+
+    @Test
+    void acceptsAGrantAddressedToThisEngine() throws Exception {
+        assertEquals("grant-1", grantValidator().validateGrant(sign(grant().build(), signingKey)).getJWTID());
+        assertDoesNotThrow(() -> grantValidator().validateGrant(sign(grant().build(), signingKey, "JWT")));
+    }
+
+    /**
+     * The point of the separate audience: an ID token from an ordinary
+     * sign-in names the client, not this engine, so it is not a password.
+     * And a grant is not an ID token.
+     */
+    @Test
+    void anIdTokenIsNotAGrantAndAGrantIsNotAnIdToken() throws Exception {
+        String idToken = sign(claims().jwtID("id-1").build(), signingKey);
+        assertDoesNotThrow(() -> grantValidator().validate(idToken));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(idToken));
+        assertThrows(Exception.class, () -> grantValidator().validate(sign(grant().build(), signingKey)));
+    }
+
+    @Test
+    void aGrantForAnotherEngineIsRejected() {
+        assertThrows(Exception.class, () -> grantValidator()
+                .validateGrant(sign(grant().audience("https://other-engine.example").build(), signingKey)));
+    }
+
+    @Test
+    void aGrantWithoutAJtiIsRejected() {
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().jwtID(null).build(), signingKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().jwtID(" ").build(), signingKey)));
+    }
+
+    /** exp − iat is capped by jwt.max-lifetime-seconds (120 by default). */
+    @Test
+    void aGrantLivingLongerThanTheMaximumIsRejected() throws Exception {
+        Date now = new Date();
+        String atLimit = sign(grant().issueTime(now).expirationTime(new Date(now.getTime() + 120_000)).build(), signingKey);
+        String over = sign(grant().issueTime(now).expirationTime(new Date(now.getTime() + 121_000)).build(), signingKey);
+        assertDoesNotThrow(() -> grantValidator().validateGrant(atLimit));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(over));
+    }
+
+    @Test
+    void aGrantStillNeedsTheProvidersSignatureAndIssuer() {
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().build(), rogueKey)));
+        assertThrows(Exception.class, () -> grantValidator()
+                .validateGrant(sign(grant().issuer("https://evil.example").build(), signingKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().build(), signingKey, "at+jwt")));
+    }
+
+    /** RFC 9068 access tokens say so in the header, in either spelling, and no path accepts them. */
+    @Test
+    void aTokenTypedAsAnAccessTokenIsRejected() {
+        assertThrows(Exception.class, () -> validator().validate(sign(claims().build(), signingKey, "at+jwt")));
+        assertThrows(Exception.class,
+                () -> validator().validate(sign(claims().build(), signingKey, "application/AT+JWT")));
+    }
+
+    /* ---- the acceptance window, which the replay cache also uses --------- */
+
+    private static final long NOW = 1_700_000_000_000L;
+
+    private static OidcConfig ageAndSkew(String maxAge, String skew) {
+        Properties p = policy();
+        p.setProperty("max-token-age-seconds", maxAge);
+        p.setProperty("clock-skew-seconds", skew);
+        return OidcConfig.from(p);
+    }
+
+    private static JWTClaimsSet issuedAt(long iat, long exp) {
+        return new JWTClaimsSet.Builder().issueTime(new Date(iat)).expirationTime(new Date(exp)).build();
+    }
+
+    /**
+     * iat may be up to skew in the future. With the provider's clock 60 s
+     * ahead, a token used now is accepted until iat + maxAge + skew, 420 s
+     * from now, not maxAge + skew from its use.
+     */
+    @Test
+    void aTokenFromAProviderClockRunningAheadIsAcceptedUntilIatPlusMaxAgePlusSkew() {
+        assertEquals(NOW + 420_000L,
+                OidcTokenValidator.acceptedUntilMillis(issuedAt(NOW + 60_000, NOW + 3_600_000), ageAndSkew("300", "60")));
+    }
+
+    @Test
+    void aShortLivedTokenIsAcceptedUntilItsExpiryPlusSkew() {
+        assertEquals(NOW + 180_000L,
+                OidcTokenValidator.acceptedUntilMillis(issuedAt(NOW, NOW + 120_000), ageAndSkew("300", "60")));
+    }
+
+    @Test
+    void anOlderTokenIsAcceptedOnlyForWhatIsLeftOfItsWindow() {
+        JWTClaimsSet older = issuedAt(NOW - 200_000, NOW + 3_600_000);
+        assertEquals(NOW + 160_000L, OidcTokenValidator.acceptedUntilMillis(older, ageAndSkew("300", "60")));
+        assertEquals(NOW + 100_000L, OidcTokenValidator.acceptedUntilMillis(older, ageAndSkew("300", "0")));
     }
 
     @Test
@@ -231,5 +379,135 @@ class OidcTokenValidatorTest {
         assertThrows(Exception.class, () -> afterRetirement.validate(sign(claims().build(), retiring)));
 
         served = new JWKSet(signingKey.toPublicJWK());           // leave the fixture as found
+    }
+
+    /* ---- the signature segment is malleable ------------------------------ */
+
+    /**
+     * One signed token, several spellings that all verify. The signature
+     * segment is not covered by the signature: ECDSA accepts {@code n−s} as
+     * readily as {@code s}, and a lenient base64url decoder ignores unused
+     * trailing bits, padding and stray characters. A replay record keyed on the
+     * whole string gave each spelling a fresh entry, so a spent token signed in
+     * again after a one-character edit.
+     *
+     * <p>The property asserted is the one that matters: no spelling is accepted
+     * a second time — it is either rejected by the validator or refused by the
+     * cache. Only {@code n−s} is required to verify, because that is ECDSA
+     * itself rather than a decoder's leniency; it keeps this test from passing
+     * on a validator that happens to reject everything.</p>
+     */
+    @Test
+    void noReSpellingOfASpentTokenIsAcceptedAgain() throws Exception {
+        ECKey ecKey = new ECKeyGenerator(Curve.P_256).keyID("ec1").generate();
+        served = new JWKSet(List.of(signingKey.toPublicJWK(), ecKey.toPublicJWK()));
+        try {
+            SignedJWT jwt = new SignedJWT(
+                    new JWSHeader.Builder(JWSAlgorithm.ES256).keyID(ecKey.getKeyID()).build(), claims().build());
+            jwt.sign(new ECDSASigner(ecKey));
+            String original = jwt.serialize();
+
+            OidcTokenValidator validator = validator();
+            ReplayCache cache = new ReplayCache();
+            long now = System.currentTimeMillis();
+            validator.validate(original);
+            assertTrue(cache.claim(original, now + 300_000, now), "the first use must be accepted");
+
+            Map<String, String> respellings = respellings(original);
+            assertDoesNotThrow(() -> validator.validate(respellings.get("s replaced by n - s")),
+                    "ECDSA verifies n - s; if this stops verifying, the test below proves nothing");
+            for (Map.Entry<String, String> respelled : respellings.entrySet()) {
+                String token = respelled.getValue();
+                assertNotEquals(original, token, respelled.getKey());
+                assertFalse(signsIn(validator, cache, token, now),
+                        respelled.getKey() + ": a spent token must not sign in again");
+            }
+        } finally {
+            served = new JWKSet(signingKey.toPublicJWK());   // leave the fixture as found
+        }
+    }
+
+    /**
+     * The fix rests on this: the signed part — {@code header.payload} — has
+     * exactly one spelling that verifies. Re-spell either segment the ways the
+     * signature segment can be re-spelled and the signature no longer matches.
+     * If a parser upgrade ever made one of these verify, keying on the signed
+     * part would stop being enough; this is where that would show.
+     */
+    @Test
+    void reSpellingTheSignedPartBreaksTheSignature() throws Exception {
+        OidcTokenValidator validator = validator();
+        String[] parts = sign(claims().build(), signingKey).split("\\.");
+        Map<String, String> respellings = new LinkedHashMap<>();
+        for (int segment = 0; segment < 2; segment++) {
+            String name = segment == 0 ? "header" : "payload";
+            for (Map.Entry<String, String> spelling : Map.of(
+                    "unused bits", spareBits(parts[segment]),
+                    "'=' padding", parts[segment] + "=",
+                    "'==' padding", parts[segment] + "==",
+                    "'*' appended", parts[segment] + "*").entrySet()) {
+                String[] edited = parts.clone();
+                edited[segment] = spelling.getValue();
+                respellings.put(name + " " + spelling.getKey(), String.join(".", edited));
+            }
+        }
+        ReplayCache cache = new ReplayCache();
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, String> respelled : respellings.entrySet()) {
+            assertFalse(signsIn(validator, cache, respelled.getValue(), now),
+                    respelled.getKey() + ": a re-spelled signed part must not verify");
+        }
+    }
+
+    /** Validated, then claimed — exactly the plugin's order. A refusal anywhere is not a sign-in. */
+    private static boolean signsIn(OidcTokenValidator validator, ReplayCache cache, String token, long now) {
+        try {
+            validator.validate(token);
+            return cache.claim(token, now + 300_000, now);
+        } catch (Exception refused) {
+            return false;
+        }
+    }
+
+    private static final String BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    /** The segment with the lowest bit of its last character flipped: unused padding bits, when it has any. */
+    private static String spareBits(String segment) {
+        int last = BASE64URL.indexOf(segment.charAt(segment.length() - 1));
+        return segment.substring(0, segment.length() - 1) + BASE64URL.charAt(last ^ 0x01);
+    }
+
+    /**
+     * Spellings of an ES256 token's signature segment that decode to — or
+     * verify as — the same signature. ES256 is R‖S, 32 bytes each: 64 bytes is
+     * 86 base64url characters, the last of which carries 4 unused bits. Plus
+     * surrounding whitespace, which the parser trims before it verifies.
+     */
+    private static Map<String, String> respellings(String token) {
+        int dot = token.lastIndexOf('.');
+        String signed = token.substring(0, dot + 1);
+        String signature = token.substring(dot + 1);
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+
+        byte[] rs = Base64.getUrlDecoder().decode(signature);
+        BigInteger n = Curve.P_256.toECParameterSpec().getOrder();
+        BigInteger s = new BigInteger(1, Arrays.copyOfRange(rs, 32, 64));
+        byte[] negated = n.subtract(s).toByteArray();
+        byte[] highS = Arrays.copyOf(rs, 64);
+        Arrays.fill(highS, 32, 64, (byte) 0);
+        int length = Math.min(32, negated.length);
+        System.arraycopy(negated, negated.length - length, highS, 64 - length, length);
+
+        Map<String, String> respellings = new LinkedHashMap<>();
+        respellings.put("s replaced by n - s", signed + encoder.encodeToString(highS));
+        respellings.put("unused trailing bits set", signed + spareBits(signature));
+        respellings.put("'=' padding appended", signed + signature + "==");
+        respellings.put("'*' appended", signed + signature + "*");
+        // Not the signature segment, but the parser trims the whole token.
+        respellings.put("leading space", " " + token);
+        respellings.put("leading tab", "\t" + token);
+        respellings.put("leading newline", "\n" + token);
+        respellings.put("trailing newline", token + "\n");
+        return respellings;
     }
 }

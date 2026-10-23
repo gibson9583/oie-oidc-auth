@@ -29,17 +29,33 @@ import com.nimbusds.jwt.JWTClaimsSet;
 /**
  * The engine half of the web administrator's OpenID Connect sign-in. The
  * engine runs the browser-facing flow itself ({@link OidcFlow}); its callback
- * validates the ID token, nonce included, and issues a one-time ticket that
- * the web client redeems through the engine's ordinary login as
- * {@code password=oidc:ticket:<id>}. This plugin turns the ticket back into
- * the validated token, maps claims to an engine identity, JIT-provisions when
- * configured, syncs the RBAC role, and answers with the derived username so
- * the session — and every audited event — belongs to the real named user.
+ * validates the ID token, nonce included, and issues a one-time ticket along
+ * with the engine username the token maps to. The web client redeems the
+ * ticket through the engine's ordinary login as
+ * {@code username=<that username>, password=oidc:ticket:<id>}. This plugin
+ * turns the ticket back into the validated token, maps claims to an engine
+ * identity, refuses unless the submitted username is exactly that identity,
+ * JIT-provisions when configured, syncs the RBAC role, and answers with the
+ * derived username so the session — and every audited event — belongs to the
+ * real named user.
+ * A JWT authorization grant (RFC 7523) the same provider minted may also be
+ * presented directly as {@code password=oidc:jwt:<jwt>}, but only when
+ * {@code jwt.enabled} is true. It is checked for the discovery issuer and
+ * JWKS like an ID token, but its audience must be {@code jwt.audience}, this
+ * engine alone and never the client id, it must carry a {@code jti}, which is
+ * spent once, and it may live at most {@code jwt.max-lifetime-seconds}. It
+ * then follows the same account path. Anything else presented as an {@code oidc:}
+ * password, including a raw ID token and a {@code jwt:} credential while
+ * the flag is off, is refused unread.
  *
  * <p>Contract: an {@code oidc:}-prefixed password NEVER returns null — a
- * failed SSO assertion must not degrade into a password guess — and only a
- * ticket is a credential: a bare ID token, however obtained, is refused
- * without being examined. An UNPREFIXED password returns null (local auth
+ * failed SSO assertion must not degrade into a password guess. It succeeds
+ * only when the submitted username equals the mapped username exactly, for
+ * both {@code ticket:} and {@code jwt:}. The engine's HTTP Basic login runs
+ * the request as the username it was SENT, not the one this plugin returns,
+ * so a ticket presented under another account's name would otherwise act as
+ * that account. A placeholder such as {@code oidc} gets no exception: an
+ * engine user can carry that name too. An UNPREFIXED password returns null (local auth
  * decides, with the engine's own lockout) unless the account is SSO-managed —
  * bound to a provider subject, not listed in {@code linked-accounts}, while
  * SSO is active — in which case it is refused: that account signs in through
@@ -57,6 +73,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     public static final String PLUGIN_POINT = "OIDC Authentication";
     static final String CREDENTIAL_PREFIX = "oidc:";
     static final String TICKET_PREFIX = "ticket:";
+    static final String JWT_PREFIX = "jwt:";
     static final String SSO_MANAGED_MESSAGE = "This account signs in through SSO.";
 
     private static final Logger log = LogManager.getLogger(OidcAuthorizationPlugin.class);
@@ -78,6 +95,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
     /** Why the last apply() rejected the policy, or null if it took. */
     private volatile String lastError;
     private final ReplayCache replays = new ReplayCache();
+    private long startedAt = System.currentTimeMillis();
     /** Validated tokens waiting to be redeemed through the engine's own login. */
     private final LoginTicketStore tickets = new LoginTicketStore();
     private final ClaimsMapper mapper = new ClaimsMapper();
@@ -129,7 +147,6 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
 
     @Override
     public void stop() {
-        replays.clear();
         tickets.clear();
     }
 
@@ -307,14 +324,14 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
         return tickets;
     }
 
-    /**
-     * How long a spent token must be remembered: as long as the validator
-     * would still accept it. The freshness window is
-     * {@code iat >= now - (maxAge + skew)}, so a record kept for {@code maxAge}
-     * alone left the final {@code skew} seconds of a token's life replayable.
-     */
-    static long replayTtlMillis(OidcConfig config) {
-        return (config.maxTokenAgeSeconds() + config.clockSkewSeconds()) * 1000L;
+    /** Test seam: when this instance's replay memory began. */
+    void startedAt(long millis) {
+        this.startedAt = millis;
+    }
+
+    /** Whether a token's {@code iat} falls before this instance's replay memory, skew included. */
+    private boolean issuedBeforeStart(JWTClaimsSet claims, OidcConfig config) {
+        return claims.getIssueTime().getTime() < startedAt + config.clockSkewSeconds() * 1000L;
     }
 
     private boolean disabled() {
@@ -328,40 +345,76 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
             // account belongs to the provider.
             return ssoManaged(username) ? fail(SSO_MANAGED_MESSAGE) : null;
         }
-        if (disabled() || config == null || !config.enabled()) {
+        if (disabled() || config == null) {
             return fail("SSO is disabled on this engine.");
         }
         try {
             String credential = password.substring(CREDENTIAL_PREFIX.length());
-            if (!credential.startsWith(TICKET_PREFIX)) {
-                // Only a ticket is a credential. A bare ID token — out of a
-                // provider's debug log, from another application sharing the
-                // client, minted by some other flow — carries no nonce for an
-                // attempt this engine made, and accepting it would make every
-                // route that never touched /start a way in. Refused unread, so
-                // there is nothing here for a guess to exercise.
+            if (!config.enabled()) {
+                return fail("SSO is disabled on this engine.");
+            }
+            String token;
+            boolean direct = credential.startsWith(JWT_PREFIX);
+            if (direct) {
+                // Off unless the policy opts in. Refused unread, same as a bare
+                // ID token: this presentation never went through /start and has
+                // no nonce, so it is not a default.
+                if (!config.jwtEnabled()) {
+                    return fail("SSO sign-in was rejected.");
+                }
+                // A JWT grant minted by the configured provider for this engine.
+                token = credential.substring(JWT_PREFIX.length());
+                if (token.isEmpty()) {
+                    return fail("SSO sign-in was rejected.");
+                }
+            } else if (credential.startsWith(TICKET_PREFIX)) {
+                LoginTicketStore.Ticket ticket =
+                        tickets.redeem(credential.substring(TICKET_PREFIX.length()), System.currentTimeMillis());
+                if (ticket == null) {
+                    return fail("SSO sign-in expired or was already used. Try again.");
+                }
+                // The token behind the ticket passed validation, nonce included, in
+                // the callback that issued it. Checking it again costs one cached
+                // signature verification and catches a token that expired during
+                // the minute a ticket may wait.
+                token = ticket.token();
+            } else {
+                // A bare ID token — out of a provider's debug log, from another
+                // application sharing the client — carries no nonce for an attempt
+                // this engine made. Refused unread, so there is nothing here for
+                // a guess to exercise. The jwt: prefix is the explicit presentation.
                 return fail("SSO sign-in was rejected.");
             }
-            LoginTicketStore.Ticket ticket =
-                    tickets.redeem(credential.substring(TICKET_PREFIX.length()), System.currentTimeMillis());
-            if (ticket == null) {
-                return fail("SSO sign-in expired or was already used. Try again.");
+            JWTClaimsSet claims = direct ? validator.validateGrant(token) : validator.validate(token);
+            // The replay memory is in memory and starts empty with this
+            // instance, so a grant issued before then may have been spent on
+            // an earlier run. The skew covers a provider clock running behind.
+            // Tickets are exempt: the callback fetched their token with a
+            // single-use code, and tickets do not survive a restart.
+            if (direct && issuedBeforeStart(claims, config)) {
+                log.debug("OIDC login rejected: the jwt: grant was issued before this engine's replay memory began");
+                return fail("SSO sign-in was rejected.");
             }
-            // The token behind the ticket passed validation, nonce included, in
-            // the callback that issued it. Checking it again costs one cached
-            // signature verification and catches a token that expired during
-            // the minute a ticket may wait.
-            String token = ticket.token();
-            JWTClaimsSet claims = validator.validate(token);
-            // Only AFTER the token proves valid: recording an unverified string
-            // would let anyone fill the cache with garbage, and the capacity
-            // guard refuses logins when full. A ticket is single-use, so this is
-            // the backstop for the day two tickets are issued for one token.
-            if (!replays.claim(token, replayTtlMillis(config), System.currentTimeMillis())) {
+            // Recorded only after validation, so garbage cannot fill the cache.
+            // A grant by its jti; an ID token by its signed content.
+            long now = System.currentTimeMillis();
+            long keepUntil = OidcTokenValidator.acceptedUntilMillis(claims, config);
+            boolean firstUse = direct
+                    ? replays.claimId(claims.getIssuer(), claims.getJWTID(), keepUntil, now)
+                    : replays.claim(token, keepUntil, now);
+            if (!firstUse) {
                 return fail("SSO assertion was already used.");
             }
 
             ClaimsMapper.Identity identity = mapper.map(claims, config);
+            // The engine's HTTP Basic path runs the request as the SUBMITTED
+            // name, not the one returned below (see the class javadoc), so it
+            // must be the token's user, exactly. Checked before provisioning.
+            if (!identity.username().equals(username)) {
+                log.warn("OIDC login rejected: the submitted username does not match the token's user '{}'",
+                        identity.username());
+                return fail("SSO sign-in was rejected.");
+            }
             UserProvisioner.Result provisioned = new UserProvisioner(users.get()).provision(identity, config);
             roles.assign(provisioned.user().getId(), provisioned.created(), identity, config);
             // The engine's own event log records every login; this is for a
@@ -384,7 +437,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
      * Whether a local-password sign-in for this username must be refused
      * because the account belongs to the identity provider: bound to a subject
      * on an earlier SSO sign-in and not named in {@code linked-accounts}. Only
-     * while SSO is ACTIVE — with the policy off or the emergency switch thrown,
+     * while SSO is active — with it off, or the emergency switch thrown,
      * the local password is the only way in and must keep working; that is
      * what the switch is for. Accounts in {@code linked-accounts} keep both
      * routes by the operator's explicit decision. Without this, anyone who

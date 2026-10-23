@@ -49,6 +49,17 @@ public final class ClaimsMapper {
             int split = name.lastIndexOf(' ');
             profile.setFirstName(split > 0 ? name.substring(0, split) : name);
             profile.setLastName(split > 0 ? name.substring(split + 1) : "");
+        } else {
+            // Profile-scope tokens often carry given_name and family_name and no
+            // single name claim. A present name claim still wins.
+            String given = text(claims, "given_name");
+            String family = text(claims, "family_name");
+            if (given != null) {
+                profile.setFirstName(given);
+            }
+            if (family != null) {
+                profile.setLastName(family);
+            }
         }
 
         Object roleClaim = claimAt(claims, config.rolesClaim());

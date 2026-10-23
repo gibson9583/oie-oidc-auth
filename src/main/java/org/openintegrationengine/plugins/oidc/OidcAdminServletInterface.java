@@ -55,7 +55,7 @@ public interface OidcAdminServletInterface extends BaseServletInterface {
 
     @POST
     @Path("/callback")
-    @Operation(summary = "Completes a browser sign-in from the code and state the provider returned; answers with a one-time login ticket.")
+    @Operation(summary = "Completes a browser sign-in from the code and state the provider returned; answers with a one-time login ticket and the engine username to redeem it under.")
     @MirthOperation(name = "completeOidcLogin", display = "Complete OIDC sign-in", auditable = false)
     String callback(String json) throws ClientException;
 

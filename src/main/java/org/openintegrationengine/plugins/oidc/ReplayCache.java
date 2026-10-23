@@ -12,9 +12,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.regex.Pattern;
 
 /**
- * Refuses an ID token that has already been spent.
+ * Refuses a token that has already been spent: an ID token by its signed
+ * content, a JWT grant by its {@code jti}.
  *
  * <p>A valid ID token stays cryptographically valid until it expires, so
  * anything that captures one — a proxy log, a shared browser, an
@@ -40,7 +42,11 @@ final class ReplayCache {
      */
     static final int LIMIT = 10000;
 
-    /** token hash → the instant its record may be forgotten. */
+    /** Two non-empty base64url segments, nothing else. */
+    private static final Pattern CANONICAL_SIGNED_CONTENT =
+            Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
+
+    /** hash of a token's signed content, or of a grant's issuer and jti → when its record may be forgotten. */
     private final ConcurrentMap<String, Long> seen = new ConcurrentHashMap<>();
 
     /**
@@ -52,12 +58,25 @@ final class ReplayCache {
      * genuinely useful to whoever is signing in; a full cache is not their
      * problem to solve, so that one throws and reaches the generic refusal.</p>
      *
-     * @param ttlMillis how long the record must outlive this call — the token's
-     *                  own remaining validity, so a record is never dropped
-     *                  while the token it describes could still be presented
+     * @param keepUntil when the record may be forgotten: the last instant the
+     *                  token is accepted, so a record is never dropped while
+     *                  the token it describes could still be presented
      * @return true if this is the token's first use
      */
-    boolean claim(String token, long ttlMillis, long now) {
+    boolean claim(String token, long keepUntil, long now) {
+        return record("content:" + signedContent(token), keepUntil, now);
+    }
+
+    /**
+     * Records a JWT grant as spent by its issuer and {@code jti} (RFC 7523
+     * §3, item 7). The jti is the grant's identity, so a re-signed or
+     * re-spelled copy is the same grant.
+     */
+    boolean claimId(String issuer, String jti, long keepUntil, long now) {
+        return record("jti:" + issuer + "#" + jti, keepUntil, now);
+    }
+
+    private boolean record(String key, long keepUntil, long now) {
         // Sweep first: expired records are not evidence, and clearing them is
         // what keeps the capacity check below measuring live pressure rather
         // than accumulated history.
@@ -65,11 +84,35 @@ final class ReplayCache {
         if (seen.size() > LIMIT) {
             throw new SecurityException("replay cache capacity reached");
         }
-        return seen.putIfAbsent(hash(token), now + ttlMillis) == null;
+        return seen.putIfAbsent(hash(key), keepUntil) == null;
     }
 
-    void clear() {
-        seen.clear();
+    /**
+     * What a token IS, for the purpose of remembering it: the
+     * {@code header.payload} its signature covers.
+     *
+     * <p>Not the whole string. The signature segment is not covered by the
+     * signature, and it can be re-spelled while still verifying — ECDSA accepts
+     * {@code n−s} as readily as {@code s}, and the base64url decoder ignores
+     * unused trailing bits, padding and stray characters. Keyed on the whole
+     * string, every spelling was a fresh token and a spent one signed in again.</p>
+     *
+     * <p>The signed part must be canonical base64url — no whitespace, no
+     * padding, nothing outside the alphabet — or the token is refused. The
+     * parser is lenient there too: it trims, so {@code " " + token} verifies,
+     * and keying on the raw prefix would hand that spelling a record of its
+     * own. Refusing anything non-canonical, rather than mirroring what the
+     * parser happens to forgive today, means a key is always exactly the bytes
+     * the signature was checked over. No token from a real provider is
+     * refused by this.</p>
+     */
+    static String signedContent(String token) {
+        int last = token.lastIndexOf('.');
+        String signed = last < 0 ? "" : token.substring(0, last);
+        if (!CANONICAL_SIGNED_CONTENT.matcher(signed).matches()) {
+            throw new SecurityException("not a compact JWS");
+        }
+        return signed;
     }
 
     /**

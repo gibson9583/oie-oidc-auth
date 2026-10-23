@@ -50,6 +50,17 @@ class ClaimsMapperTest {
     }
 
     @Test
+    void usesGivenAndFamilyNameWhenThereIsNoNameClaim() throws Exception {
+        ClaimsMapper.Identity identity = new ClaimsMapper().map(
+                claims().claim("preferred_username", "jdoe")
+                        .claim("given_name", "Jane")
+                        .claim("family_name", "Doe").build(),
+                config(""));
+        assertEquals("Jane", identity.profile().getFirstName());
+        assertEquals("Doe", identity.profile().getLastName());
+    }
+
+    @Test
     void appliesTheNamespacePrefix() throws Exception {
         ClaimsMapper.Identity identity = new ClaimsMapper().map(
                 claims().claim("preferred_username", "jdoe").build(), config("sso:"));

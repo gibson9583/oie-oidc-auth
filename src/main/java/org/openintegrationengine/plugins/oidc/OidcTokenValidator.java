@@ -7,10 +7,10 @@
 package org.openintegrationengine.plugins.oidc;
 
 import java.net.URL;
-import java.time.Instant;
 
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.proc.BadJOSEException;
+import com.nimbusds.jose.proc.DefaultJOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.JWSKeySelector;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
@@ -24,10 +24,11 @@ import com.nimbusds.jwt.proc.BadJWTException;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 
 /**
- * Full JOSE validation of an ID token: signature against the provider's JWKS,
- * an asymmetric-only algorithm allowlist (kills alg=none and HS256 key
- * confusion), issuer, audience (+azp on multi-audience tokens), and an
- * exp/nbf/iat freshness window with configured skew.
+ * Full JOSE validation of a provider-signed token: signature against the
+ * provider's JWKS, an asymmetric-only algorithm allowlist (kills alg=none and
+ * HS256 key confusion), issuer, and an exp/nbf/iat freshness window with
+ * configured skew. {@link #validate(String)} adds the ID-token audience rules;
+ * {@link #validateGrant(String)} adds the rules for a JWT grant.
  *
  * <p>The JWK source is held for the lifetime of this validator (one validator
  * per config load), so JWKS fetches are cached across logins with the
@@ -76,7 +77,54 @@ public final class OidcTokenValidator {
         return claims;
     }
 
+    /**
+     * An ID token from this engine's own sign-in: {@link #verify(String)},
+     * then audience and {@code azp} per OIDC Core 3.1.3.7.
+     */
     public JWTClaimsSet validate(String token) throws Exception {
+        JWTClaimsSet claims = verify(token);
+        if (!claims.getAudience().contains(config.clientId())) {
+            throw new BadJWTException("issuer or audience rejected");
+        }
+        // OIDC Core 3.1.3.7 items 4 and 5: several audiences require azp, and
+        // an azp that is present must be this client.
+        String azp = claims.getStringClaim("azp");
+        if ((claims.getAudience().size() > 1 || azp != null) && !config.clientId().equals(azp)) {
+            throw new BadJWTException("azp rejected");
+        }
+        return claims;
+    }
+
+    /**
+     * A JWT authorization grant presented as {@code oidc:jwt:} (RFC 7523 §3):
+     * {@link #verify(String)}, then {@code aud} must name this engine
+     * ({@code jwt.audience}, never the client id, so an ordinary ID token is
+     * not a password), {@code jti} must be present so the grant can be spent
+     * once, and {@code exp - iat} must be at most
+     * {@code jwt.max-lifetime-seconds}: a grant is minted right before use.
+     */
+    public JWTClaimsSet validateGrant(String token) throws Exception {
+        JWTClaimsSet claims = verify(token);
+        if (!claims.getAudience().contains(config.jwtAudience())) {
+            throw new BadJWTException("audience rejected");
+        }
+        if (claims.getJWTID() == null || claims.getJWTID().isBlank()) {
+            throw new BadJWTException("jti required");
+        }
+        long lifetime = claims.getExpirationTime().getTime() - claims.getIssueTime().getTime();
+        if (lifetime > config.jwtMaxLifetimeSeconds() * 1000L) {
+            throw new BadJWTException("token lifetime rejected");
+        }
+        return claims;
+    }
+
+    /**
+     * What every token must pass: an allowed asymmetric algorithm, a signature
+     * from the provider's JWKS, a header {@code typ} of JWT or none (so an
+     * RFC 9068 access token is refused), the discovered issuer, and an
+     * exp/iat/nbf window with skew. Audience is the caller's rule.
+     */
+    private JWTClaimsSet verify(String token) throws Exception {
         DiscoveryClient.Metadata metadata = discovery.get(config);
         SignedJWT parsed = SignedJWT.parse(token);
         String alg = parsed.getHeader().getAlgorithm().getName();
@@ -88,28 +136,36 @@ public final class OidcTokenValidator {
                 new JWSVerificationKeySelector<>(JWSAlgorithm.parse(alg), jwksFor(metadata.jwksUri()));
         DefaultJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
         processor.setJWSKeySelector(keySelector);
-        JWTClaimsSet claims = processor.process(token, null);
+        processor.setJWSTypeVerifier(DefaultJOSEObjectTypeVerifier.JWT);
+        JWTClaimsSet claims = processor.process(parsed, null);
 
-        if (!metadata.issuer().equals(claims.getIssuer()) || !claims.getAudience().contains(config.clientId())) {
+        if (!metadata.issuer().equals(claims.getIssuer())) {
             throw new BadJWTException("issuer or audience rejected");
         }
-        if (claims.getAudience().size() > 1 && !config.clientId().equals(claims.getStringClaim("azp"))) {
-            throw new BadJWTException("azp rejected");
+        if (claims.getExpirationTime() == null || claims.getIssueTime() == null) {
+            throw new BadJWTException("token lifetime rejected");
         }
-
-        Instant now = Instant.now();
-        long skew = config.clockSkewSeconds();
-        boolean expired = claims.getExpirationTime() == null
-                || claims.getExpirationTime().toInstant().isBefore(now.minusSeconds(skew));
+        long now = System.currentTimeMillis();
+        long skewMillis = config.clockSkewSeconds() * 1000L;
         boolean notYetValid = claims.getNotBeforeTime() != null
-                && claims.getNotBeforeTime().toInstant().isAfter(now.plusSeconds(skew));
-        boolean staleOrFuture = claims.getIssueTime() == null
-                || claims.getIssueTime().toInstant().isBefore(now.minusSeconds(config.maxTokenAgeSeconds() + skew))
-                || claims.getIssueTime().toInstant().isAfter(now.plusSeconds(skew));
-        if (expired || notYetValid || staleOrFuture) {
+                && claims.getNotBeforeTime().getTime() > now + skewMillis;
+        boolean issuedInFuture = claims.getIssueTime().getTime() > now + skewMillis;
+        if (now > acceptedUntilMillis(claims, config) || notYetValid || issuedInFuture) {
             throw new BadJWTException("token lifetime rejected");
         }
         return claims;
+    }
+
+    /**
+     * The last instant {@link #validate(String)} accepts this token:
+     * {@code min(exp, iat + maxAge) + skew}. The replay cache keeps a spent
+     * token's record until then, so both windows come from this one place.
+     * Requires {@code exp} and {@code iat}, which validation guarantees.
+     */
+    static long acceptedUntilMillis(JWTClaimsSet claims, OidcConfig config) {
+        return Math.min(claims.getExpirationTime().getTime(),
+                claims.getIssueTime().getTime() + config.maxTokenAgeSeconds() * 1000L)
+                + config.clockSkewSeconds() * 1000L;
     }
 
     /** One cached remote JWKS per URI; rebuilt only if discovery moves it. */

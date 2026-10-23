@@ -22,7 +22,7 @@ import java.util.Set;
  */
 public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, String clientSecret,
         String webAdministratorUrl, java.util.List<String> scopes, String providerLabel, boolean autoRedirect,
-        String usernameClaim,
+        boolean jwtEnabled, String jwtAudience, long jwtMaxLifetimeSeconds, String usernameClaim,
         Set<String> allowedAlgorithms, long clockSkewSeconds, long maxTokenAgeSeconds, long jwksCacheTtlSeconds,
         boolean jitEnabled, String emailClaim, String nameClaim, String organizationClaim, String usernamePrefix,
         Map<String, String> linkedAccounts, String rolesClaim, Map<String, String> rolesMap, String defaultRole,
@@ -78,6 +78,26 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         long clockSkew = number(p, "clock-skew-seconds");
         long maxTokenAge = number(p, "max-token-age-seconds");
         long jwksTtl = number(p, "jwks-cache-ttl-seconds");
+        long jwtMaxLifetime = number(p, "jwt.max-lifetime-seconds");
+        boolean jwtEnabled = bool(p, "jwt.enabled");
+        String jwtAudience = value(p, "jwt.audience").trim();
+        // A jwt: token is an RFC 7523 grant addressed to this engine alone. Its
+        // audience must be its own: with the client id, every ID token the
+        // provider issues for an ordinary sign-in, on any engine sharing the
+        // client, would also be accepted as a password.
+        if (enabled && jwtEnabled) {
+            if (jwtAudience.isEmpty()) {
+                throw new IllegalArgumentException("jwt.audience is required when jwt.enabled is true. Set it to an "
+                        + "identifier for this engine alone, e.g. its URL, and have the issuer put it in aud.");
+            }
+            if (jwtAudience.equals(clientId)) {
+                throw new IllegalArgumentException("jwt.audience must differ from client-id, or every ID token "
+                        + "issued to the client would be accepted as a jwt: password.");
+            }
+            if (jwtMaxLifetime <= 0) {
+                throw new IllegalArgumentException("jwt.max-lifetime-seconds must be positive");
+            }
+        }
         String rolesSync = value(p, "roles.sync");
         String defaultRole = value(p, "roles.default").trim();
         // With RBAC installed, a returning user whose claims resolve to no role
@@ -107,6 +127,12 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
                 scopes,
                 value(p, "provider-label").trim().isEmpty() ? "SSO" : value(p, "provider-label").trim(),
                 bool(p, "auto-redirect"),
+                // FALSE when absent, same rule as jit.enabled: a stored policy
+                // from before this key existed must not start accepting raw
+                // tokens. Direct presentation has no nonce.
+                jwtEnabled,
+                jwtAudience,
+                jwtMaxLifetime,
                 value(p, "username-claim"),
                 csv(value(p, "allowed-algorithms")),
                 clockSkew,

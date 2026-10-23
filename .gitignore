@@ -1,3 +1,10 @@
 /target/
 /webadmin/node_modules/
 .DS_Store
+graphify-out
+certificate
+mise.toml
+.vscode
+.cursor
+.claude
+.env

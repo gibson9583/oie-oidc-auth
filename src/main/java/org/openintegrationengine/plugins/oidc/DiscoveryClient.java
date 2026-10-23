@@ -213,6 +213,33 @@ public final class DiscoveryClient {
         }
     }
 
+    static final String WELL_KNOWN_SUFFIX = "/.well-known/openid-configuration";
+
+    /**
+     * OpenID Connect Discovery 1.0 §4.3: the {@code issuer} a document reports
+     * MUST be identical to the Issuer URL the document was fetched under, i.e.
+     * the discovery URL without {@code /.well-known/openid-configuration}.
+     * Every token is checked against this issuer, so without the check a wrong
+     * or tampered discovery URL could make the engine trust a different one.
+     * A trailing slash on the issuer is ignored: §4 removes it before
+     * appending the suffix (Auth0's issuer ends in one). A query string on the
+     * discovery URL is not part of the Issuer URL.
+     */
+    static void requireIssuerMatchesDiscoveryUrl(String issuer, String discoveryUrl) throws IOException {
+        URI url = URI.create(discoveryUrl.trim());
+        String path = url.getRawPath() == null ? "" : url.getRawPath();
+        if (!path.endsWith(WELL_KNOWN_SUFFIX)) {
+            throw new IOException("discovery-url must end with " + WELL_KNOWN_SUFFIX);
+        }
+        String expected = url.getScheme() + "://" + url.getRawAuthority()
+                + path.substring(0, path.length() - WELL_KNOWN_SUFFIX.length());
+        String reported = issuer.endsWith("/") ? issuer.substring(0, issuer.length() - 1) : issuer;
+        if (!reported.equals(expected)) {
+            throw new IOException("The discovery document's issuer '" + issuer
+                    + "' does not match the discovery URL, which expects '" + expected + "'");
+        }
+    }
+
     private Metadata fetch(OidcConfig config) throws Exception {
         // A blank URL must say so — falling through to the HTTPS check turns
         // "you haven't entered one" into a baffling protocol complaint.
@@ -237,6 +264,7 @@ public final class DiscoveryClient {
         if (issuer.isBlank() || jwksUri.isBlank()) {
             throw new IOException("Incomplete OIDC discovery document");
         }
+        requireIssuerMatchesDiscoveryUrl(issuer, config.discoveryUrl());
         // The document is attacker-influencable only if discovery itself is —
         // but a compromised or misconfigured IdP must still not downgrade key
         // fetching to plaintext. The same goes for where the browser is sent
